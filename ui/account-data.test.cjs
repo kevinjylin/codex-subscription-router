@@ -107,7 +107,7 @@ test("manual selection posts the selected account and propagates rejection", asy
       return { ok: accountId !== "depleted", json: async () => accountId === "depleted" ? { error: "Out of usage" } : { accountId } };
     },
   });
-  vm.runInContext(source, context);
+  vm.runInContext(`(() => { ${source} })();`, context);
   assert.equal((await context.codexMuxSelectAccount("other")).accountId, "other");
   assert.equal(requests[0].options.method, "POST");
   assert.ok(requests[0].url.endsWith("/account-selection"));
@@ -142,8 +142,10 @@ test("Switch to account menu action selects routing without opening usage", asyn
     },
     __codexMuxAccounts: [account],
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8"), context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "account-menu.js"), "utf8"), context);
+  // Bundles have separate module scopes; only explicit globals cross the boundary.
+  vm.runInContext(`(() => { ${fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8")} })();`, context);
+  vm.runInContext(`(() => { ${fs.readFileSync(path.join(__dirname, "account-menu.js"), "utf8")}
+    globalThis.CodexMuxAccountMenu = CodexMuxAccountMenu; })();`, context);
   function render() { cursor = 0; return context.CodexMuxAccountMenu().props.children; }
   const event = { preventDefault() {} };
   render().find((row) => row.key === "codex-mux-account-other").props.onSelect(event);

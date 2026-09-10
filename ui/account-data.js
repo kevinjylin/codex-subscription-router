@@ -291,6 +291,7 @@ Object.assign(globalThis, {
   codexMuxCachedAccounts,
   codexMuxRememberAccounts,
   codexMuxFetchAccounts,
+  codexMuxSelectAccount,
   codexMuxScopePluginRequest,
   codexMuxProfileData,
   codexMuxFilterUsageStatus,
