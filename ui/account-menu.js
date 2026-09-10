@@ -165,6 +165,7 @@ function CodexMuxAccountMenu() {
     () => !codexMuxCachedAccounts().some((account) => account.connected),
   );
   const [busy, setBusy] = kXc.useState(false);
+  const [selectedAccountId, setSelectedAccountId] = kXc.useState("");
   const [error, setError] = kXc.useState("");
   const [login, setLogin] = kXc.useState(null);
   const [codeCopied, setCodeCopied] = kXc.useState(false);
@@ -176,6 +177,8 @@ function CodexMuxAccountMenu() {
     try {
       const nextAccounts = await codexMuxFetchAccounts();
       setAccounts(nextAccounts);
+      const selection = await codexMuxRequest("/account-selection");
+      setSelectedAccountId(selection.accountId || "");
       setError("");
       if (nextAccounts.some((account) => account.connected)) setLoading(false);
     } catch (requestError) {
@@ -196,7 +199,7 @@ function CodexMuxAccountMenu() {
         ) {
           setLogin(null);
         }
-        if (payload.type === "account-updated") refresh();
+        if (payload.type === "account-updated" || payload.type === "account-selection-changed") refresh();
       } catch {}
     };
     const warmupTimer = setTimeout(refresh, 2_000);
@@ -288,7 +291,22 @@ function CodexMuxAccountMenu() {
     if (next !== pairing?.accountId) setPairing(null);
   }
 
-  function switchAccount(account, event) {
+  async function switchAccount(accountId, event) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await codexMuxSelectAccount(accountId);
+      setSelectedAccountId(result.accountId || "");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function viewAccountUsage(account, event) {
     event.preventDefault();
     setExpandedAccountId(null);
     BW(modalScope, CodexMuxUsageModal, { initialAccountId: account.id });
@@ -396,14 +414,21 @@ function CodexMuxAccountMenu() {
       ),
     );
     if (expandedAccountId === account.id) {
+      rows.push((0, e7.jsx)(_H, {
+        LeftIcon: CodexMuxSwitchIcon,
+        SubText: "Use for new tasks and next messages this session",
+        disabled: busy || selectedAccountId === account.id,
+        onSelect: (event) => switchAccount(account.id, event),
+        children: selectedAccountId === account.id ? "Selected account" : busy ? "Switching…" : "Switch to account",
+      }, `codex-mux-account-${account.id}-select`));
       rows.push(
         (0, e7.jsx)(
           _H,
           {
             LeftIcon: CodexMuxSwitchIcon,
             SubText: account.email || "View this subscription's usage",
-            onSelect: (event) => switchAccount(account, event),
-            children: "Switch to account",
+            onSelect: (event) => viewAccountUsage(account, event),
+            children: "View account usage",
           },
           `codex-mux-account-${account.id}-switch`,
         ),
@@ -446,6 +471,14 @@ function CodexMuxAccountMenu() {
     );
   }
 
+  rows.push((0, e7.jsx)(_H, {
+    LeftIcon: CodexMuxSwitchIcon,
+    SubText: selectedAccountId ? "Clear the account selection" : "Choose accounts based on available usage",
+    disabled: busy || !selectedAccountId,
+    onSelect: (event) => switchAccount("", event),
+    children: selectedAccountId ? "Use automatic routing" : "Automatic routing enabled",
+  }, "codex-mux-automatic-routing"));
+
   if (error) {
     rows.push(
       (0, e7.jsx)(
@@ -456,7 +489,7 @@ function CodexMuxAccountMenu() {
           tone: "danger",
           allowWrap: true,
           subTextAllowWrap: true,
-          children: "Subscription pool unavailable",
+          children: "Account action failed",
         },
         "codex-mux-error",
       ),

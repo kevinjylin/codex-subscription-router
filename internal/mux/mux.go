@@ -96,6 +96,9 @@ type Multiplexer struct {
 	resetPreviewMu sync.RWMutex
 	resetPreviews  map[string]ResetCreditsPreview
 
+	selectionMu       sync.RWMutex
+	selectedAccountID string
+
 	snapshots *snapshotCache
 }
 
@@ -342,7 +345,7 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 		m.write(protocol.Failure(message.ID, -32022, "no controller account is configured"))
 		return
 	}
-	if threadID != "" && (message.Method == "turn/start" || message.Method == "thread/settings/update") {
+	if threadID != "" && message.Method == "thread/settings/update" {
 		if refusal, ok := m.refuseUnsupportedModel(message, accountID); ok {
 			m.write(refusal)
 			return
@@ -425,6 +428,29 @@ func (m *Multiplexer) refuseUnsupportedModel(message protocol.Message, ownerID s
 func (m *Multiplexer) routeTurnStart(message protocol.Message, threadID, ownerID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
 	defer cancel()
+	if selected := m.SelectedAccount(); selected != "" && selected != ownerID {
+		snapshot, err := m.routingSnapshot(ctx, selected)
+		if err == nil && accountHasCapacity(snapshot) {
+			if refusal, refused := m.refuseUnsupportedModel(message, selected); refused {
+				m.write(refusal)
+				return
+			}
+			if err := m.resumeThreadOnAccount(ctx, threadID, ownerID, selected); err != nil {
+				m.write(protocol.Failure(message.ID, -32027, fmt.Sprintf("Cannot switch this task: %v. Wait for it to finish, or start a new task on the selected account.", err)))
+				return
+			}
+			if err := m.store.SetThreadOwner(threadID, selected); err != nil {
+				m.write(protocol.Failure(message.ID, -32028, err.Error()))
+				return
+			}
+			m.publish(Event{Type: "thread-failed-over", AccountID: selected, Data: map[string]any{"threadId": threadID}})
+			ownerID = selected
+		}
+	}
+	if refusal, refused := m.refuseUnsupportedModel(message, ownerID); refused {
+		m.write(refusal)
+		return
+	}
 	snapshot, err := m.routingSnapshot(ctx, ownerID)
 	if err != nil || accountHasCapacity(snapshot) {
 		if err := m.forward(ownerID, message); err != nil {
@@ -514,10 +540,24 @@ func (m *Multiplexer) resumeThreadOnAccount(ctx context.Context, threadID, sourc
 			Path          string `json:"path"`
 			CWD           string `json:"cwd"`
 			ModelProvider string `json:"modelProvider"`
+			Status        struct {
+				Type string `json:"type"`
+			} `json:"status"`
+			Turns []struct {
+				Status string `json:"status"`
+			} `json:"turns"`
 		} `json:"thread"`
 	}
 	if err := json.Unmarshal(readResponse.Result, &readResult); err != nil {
 		return fmt.Errorf("decode existing chat: %w", err)
+	}
+	if readResult.Thread.Status.Type == "active" {
+		return errors.New("the task is still running; wait for it to finish before switching accounts")
+	}
+	for _, turn := range readResult.Thread.Turns {
+		if turn.Status == "inProgress" {
+			return errors.New("the task is still running; wait for it to finish before switching accounts")
+		}
 	}
 	if readResult.Thread.ID == "" || readResult.Thread.Path == "" {
 		return errors.New("existing chat has no resumable history path")
@@ -934,8 +974,15 @@ func accountHasCapacity(snapshot AccountSnapshot) bool {
 	if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
 		return false
 	}
-	weekly, _ := longestAndShortestWindow(snapshot.RateLimits)
-	return weekly == nil || weekly.UsedPercent < 100
+	if snapshot.RateLimits == nil {
+		return true
+	}
+	for _, window := range []*RateLimitWindow{snapshot.RateLimits.Primary, snapshot.RateLimits.Secondary} {
+		if window != nil && window.UsedPercent >= 100 {
+			return false
+		}
+	}
+	return true
 }
 
 func isUsageLimitResponse(message protocol.Message) bool {

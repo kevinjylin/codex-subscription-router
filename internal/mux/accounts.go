@@ -287,7 +287,7 @@ func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[s
 		if _, skip := excluded[snapshot.ID]; skip {
 			continue
 		}
-		if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
+		if !accountHasCapacity(snapshot) {
 			continue
 		}
 		account, ok := m.store.Account(snapshot.ID)
@@ -295,9 +295,6 @@ func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[s
 			continue
 		}
 		weekly, short := longestAndShortestWindow(snapshot.RateLimits)
-		if weekly != nil && weekly.UsedPercent >= 100 {
-			continue
-		}
 		weeklyUsed := 1_000.0
 		shortUsed := 1_000.0
 		reason := RouteReason{ThreadCount: snapshot.ThreadCount}
@@ -361,8 +358,12 @@ collectResetCredits:
 		}
 	}
 
+	selected := m.SelectedAccount()
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
+		if (left.account.ID == selected) != (right.account.ID == selected) {
+			return left.account.ID == selected
+		}
 		if math.Abs(left.urgency-right.urgency) > 0.000001 {
 			return left.urgency > right.urgency
 		}
@@ -430,8 +431,7 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 		accountFiveHour, accountWeekly := fiveHourAndWeeklyWindows(snapshot.RateLimits)
 		fiveHour = append(fiveHour, accountFiveHour)
 		weekly = append(weekly, accountWeekly)
-		longest, _ := longestAndShortestWindow(snapshot.RateLimits)
-		if longest == nil || longest.UsedPercent < 100 {
+		if accountHasCapacity(snapshot) {
 			hasCapacity = true
 		}
 	}

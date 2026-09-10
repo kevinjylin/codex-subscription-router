@@ -95,3 +95,61 @@ test("does not present one known cadence as both limits", () => {
   assert.equal(helpers.codexMuxFiveHourWindow(fiveHourOnly).usedPercent, 20);
   assert.equal(helpers.codexMuxWeeklyWindow(fiveHourOnly), null);
 });
+
+
+test("manual selection posts the selected account and propagates rejection", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8");
+  const requests = [];
+  const context = vm.createContext({
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      const { accountId } = JSON.parse(options.body);
+      return { ok: accountId !== "depleted", json: async () => accountId === "depleted" ? { error: "Out of usage" } : { accountId } };
+    },
+  });
+  vm.runInContext(source, context);
+  assert.equal((await context.codexMuxSelectAccount("other")).accountId, "other");
+  assert.equal(requests[0].options.method, "POST");
+  assert.ok(requests[0].url.endsWith("/account-selection"));
+  assert.ok(requests[0].options.headers["X-Codex-Mux-Token"]);
+  assert.equal((await context.codexMuxSelectAccount("")).accountId, "");
+  await assert.rejects(context.codexMuxSelectAccount("depleted"), /Out of usage/);
+});
+
+test("Switch to account menu action selects routing without opening usage", async () => {
+  const states = [];
+  let cursor = 0;
+  const requests = [];
+  const account = { id: "other", label: "Other", enabled: true, connected: true };
+  const jsx = (type, props, key) => ({ type, props, key });
+  const context = vm.createContext({
+    kXc: {
+      useState(initial) {
+        const index = cursor++;
+        if (!(index in states)) states[index] = typeof initial === "function" ? initial() : initial;
+        return [states[index], (value) => { states[index] = value; }];
+      },
+      useCallback: (fn) => fn,
+      useEffect() {},
+    },
+    e7: { jsx, jsxs: jsx, Fragment: "fragment" },
+    Lo() {}, Q: {}, _H: "menu-item", S2: "icon", CH: { Separator: "separator" },
+    BW() { throw new Error("Switch opened a usage modal"); },
+    localStorage: { getItem: () => null },
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => JSON.parse(options.body) };
+    },
+    __codexMuxAccounts: [account],
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "account-menu.js"), "utf8"), context);
+  function render() { cursor = 0; return context.CodexMuxAccountMenu().props.children; }
+  const event = { preventDefault() {} };
+  render().find((row) => row.key === "codex-mux-account-other").props.onSelect(event);
+  await render().find((row) => row.props.children === "Switch to account").props.onSelect(event);
+  assert.equal(JSON.parse(requests[0].options.body).accountId, "other");
+  assert.ok(render().some((row) => row.props.children === "Selected account"));
+  await render().find((row) => row.props.children === "Use automatic routing").props.onSelect(event);
+  assert.equal(JSON.parse(requests[1].options.body).accountId, "");
+});

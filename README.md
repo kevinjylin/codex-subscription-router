@@ -27,6 +27,12 @@ which is archived.
 - **Sticky threads with failover** — follow-ups stay on their account; a
   depleted owner hands the thread to one with capacity. Only when the whole
   pool is empty does the app show a limit.
+- **Manual account switching** — expand an account in the profile menu and
+  choose **Switch to account**. The selection applies to new tasks and the next
+  message in existing tasks for this app session. A task moves with its history
+  before that message runs; if it cannot safely move, the message fails with an
+  explanation. Exhausted accounts are skipped. Choose **Use automatic routing**
+  to clear the selection; restarting the app also restores automatic routing.
 - **Usage across accounts** — the profile menu shows each subscription's
   5-hour and weekly limits, while banners and alerts describe the whole pool.
 - **Native account management** — add subscriptions with device-code sign-in,

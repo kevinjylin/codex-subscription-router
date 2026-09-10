@@ -91,7 +91,7 @@ async function codexMuxProfileData(accountId = null) {
 // its usage banners, sidebar alert, and reset prompts describe one account
 // while the multiplexer routes across the pool. Replace the rate-limit
 // windows with the pooled view (mean usage, earliest reset) and clear the
-// limit-reached fields while any connected subscription still has weekly
+// limit-reached fields while any connected subscription still has
 // capacity. A fully depleted pool keeps the native limit-reached response.
 async function codexMuxFilterUsageStatus(status) {
   if (status == null || typeof status !== "object") return status;
@@ -109,8 +109,8 @@ async function codexMuxFilterUsageStatus(status) {
   );
   if (pool.length < 2) return status;
   const poolHasCapacity = pool.some((account) => {
-    const weekly = codexMuxWeeklyWindow(account.rateLimits);
-    return weekly == null || weekly.usedPercent < 100;
+    return [account.rateLimits?.primary, account.rateLimits?.secondary]
+      .every((window) => window == null || window.usedPercent < 100);
   });
   const rateLimit = status.rate_limit;
   const pooledRateLimit =
@@ -303,3 +303,10 @@ Object.assign(globalThis, {
   codexMuxWeeklyWindow,
   codexMuxUsageWindows,
 });
+
+async function codexMuxSelectAccount(accountId) {
+  return codexMuxRequest("/account-selection", {
+    method: "POST",
+    body: JSON.stringify({ accountId }),
+  });
+}
