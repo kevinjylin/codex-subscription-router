@@ -740,6 +740,7 @@ def sign_independent_app(
     desktop_executable = app / "Contents" / "MacOS" / "ChatGPT"
     desktop_entitlements = sanitized_runtime_entitlements(desktop_executable)
     computer_use_entitlements = capture_computer_use_entitlements(app, service_layout)
+    patch_native_pipe_signing_team(app, identity, team_identifier)
     patch_computer_use_identity(
         app,
         team_identifier,
@@ -1594,6 +1595,31 @@ def disable_updater_lifecycle(extracted: Path) -> None:
         1,
     )
     bundle_path.write_text(bundle, encoding="utf-8")
+
+
+def patch_native_pipe_signing_team(
+    app: Path, identity: str, team_identifier: str | None
+) -> None:
+    """Keep native socket authentication aligned with the re-signed callers."""
+    if team_identifier is None:
+        return
+    if not re.fullmatch(r"[A-Z0-9]{10}", team_identifier):
+        raise RuntimeError("invalid native pipe signing team")
+    addon = app / "Contents/Resources/native/browser-use-peer-authorization.node"
+    if not addon.is_file():
+        raise RuntimeError("native pipe peer authorization addon is missing")
+    identifier, _ = signed_code_metadata(addon)
+    entitlements = sanitized_runtime_entitlements(addon)
+    # The signature contains additional team strings. Remove it before matching
+    # the single compiled allowlist constant; re-sign after changing that value.
+    run(["codesign", "--remove-signature", str(addon)])
+    binary = addon.read_bytes()
+    original = OPENAI_DISTRIBUTION_TEAM_IDENTIFIER.encode() + b"\0"
+    if binary.count(original) != 1:
+        raise RuntimeError("expected one native pipe signing-team constant")
+    addon.write_bytes(binary.replace(original, team_identifier.encode() + b"\0"))
+    sign_runtime_executable(addon, identity, identifier, entitlements)
+    run(["codesign", "--verify", "--strict", str(addon)])
 
 
 def relax_native_pipe_peer_authorization(extracted: Path) -> None:
