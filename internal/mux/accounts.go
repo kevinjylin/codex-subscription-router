@@ -19,6 +19,9 @@ const (
 	routingMinimumWindow       = time.Minute
 	routingResetBonusPerCredit = 0.15
 	routingResetBonusCreditCap = 3
+	fiveHourWindowMinutes      = int64(5 * 60)
+	weeklyWindowMinutes        = int64(7 * 24 * 60)
+	windowDurationTolerance    = int64(1)
 )
 
 type RateLimitWindow struct {
@@ -415,8 +418,8 @@ func (m *Multiplexer) AggregatedRateLimits(ctx context.Context) (*RateLimits, er
 }
 
 func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
-	primary := make([]*RateLimitWindow, 0, len(snapshots))
-	secondary := make([]*RateLimitWindow, 0, len(snapshots))
+	fiveHour := make([]*RateLimitWindow, 0, len(snapshots))
+	weekly := make([]*RateLimitWindow, 0, len(snapshots))
 	hasSubscription := false
 	hasCapacity := false
 	for _, snapshot := range snapshots {
@@ -424,12 +427,11 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 			continue
 		}
 		hasSubscription = true
-		if snapshot.RateLimits != nil {
-			primary = append(primary, snapshot.RateLimits.Primary)
-			secondary = append(secondary, snapshot.RateLimits.Secondary)
-		}
-		weekly, _ := longestAndShortestWindow(snapshot.RateLimits)
-		if weekly == nil || weekly.UsedPercent < 100 {
+		accountFiveHour, accountWeekly := fiveHourAndWeeklyWindows(snapshot.RateLimits)
+		fiveHour = append(fiveHour, accountFiveHour)
+		weekly = append(weekly, accountWeekly)
+		longest, _ := longestAndShortestWindow(snapshot.RateLimits)
+		if longest == nil || longest.UsedPercent < 100 {
 			hasCapacity = true
 		}
 	}
@@ -437,13 +439,52 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 		return nil, errors.New("no enabled ChatGPT subscription is connected")
 	}
 	result := &RateLimits{
-		Primary:   averageRateLimitWindow(primary),
-		Secondary: averageRateLimitWindow(secondary),
+		Primary:   averageRateLimitWindow(fiveHour),
+		Secondary: averageRateLimitWindow(weekly),
 	}
 	if !hasCapacity {
 		result.RateLimitReachedType = "rate_limit_reached"
 	}
 	return result, nil
+}
+
+// fiveHourAndWeeklyWindows normalizes the two Codex quota windows by cadence.
+// The upstream primary/secondary slots have varied between plans and app-server
+// versions, so aggregating by slot can mix a 5-hour limit with a weekly limit.
+func fiveHourAndWeeklyWindows(limits *RateLimits) (*RateLimitWindow, *RateLimitWindow) {
+	if limits == nil {
+		return nil, nil
+	}
+	windows := []*RateLimitWindow{limits.Primary, limits.Secondary}
+	var fiveHour *RateLimitWindow
+	var weekly *RateLimitWindow
+	for _, window := range windows {
+		if window == nil || window.WindowDurationMins == nil {
+			continue
+		}
+		switch {
+		case durationWithin(*window.WindowDurationMins, fiveHourWindowMinutes):
+			fiveHour = window
+		case durationWithin(*window.WindowDurationMins, weeklyWindowMinutes):
+			weekly = window
+		}
+	}
+	if fiveHour != nil || weekly != nil {
+		return fiveHour, weekly
+	}
+	longest, shortest := longestAndShortestWindow(limits)
+	if longest == shortest {
+		return shortest, nil
+	}
+	return shortest, longest
+}
+
+func durationWithin(actual, expected int64) bool {
+	difference := actual - expected
+	if difference < 0 {
+		difference = -difference
+	}
+	return difference <= windowDurationTolerance
 }
 
 func averageRateLimitWindow(windows []*RateLimitWindow) *RateLimitWindow {

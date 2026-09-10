@@ -27,8 +27,8 @@ which is archived.
 - **Sticky threads with failover** — follow-ups stay on their account; a
   depleted owner hands the thread to one with capacity. Only when the whole
   pool is empty does the app show a limit.
-- **Pooled usage everywhere** — the profile menu, usage banners, sidebar
-  alert, and reset prompts describe the pool, not just the Primary account.
+- **Usage across accounts** — the profile menu shows each subscription's
+  5-hour and weekly limits, while banners and alerts describe the whole pool.
 - **Native account management** — add subscriptions with device-code sign-in,
   see per-account usage and plan, pick an account for rate-limit resets,
   Apps and MCP connections, and Profile statistics.
@@ -117,11 +117,12 @@ missing). These are separate rows from the official app's.
 
 **Add a subscription** — profile menu (bottom of the sidebar) → *Add another
 subscription* → finish the device-code sign-in in the browser. The menu shows
-pooled weekly usage, then one row per account.
+one row per account with its 5-hour and weekly usage.
 
-**Account actions** — select an account's row in the profile menu to reveal
-*Copy email address* and *Pair a device…*. Pairing enables remote control for
-that account and shows a short-lived code to enter on the phone or computer
+**Account actions** — each account row shows its 5-hour and weekly usage.
+Select a row to reveal *Switch to account* and *Pair a device…*. Switching opens
+the usage sheet on that subscription. Pairing enables remote control for that
+account and shows a short-lived code to enter on the phone or computer
 (selecting it copies). OpenAI requires multi-factor authentication on the
 account; the row says so if it is missing.
 

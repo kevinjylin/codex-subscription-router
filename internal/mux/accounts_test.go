@@ -47,6 +47,50 @@ func TestLongestAndShortestWindowHandlesSingleWindow(t *testing.T) {
 	}
 }
 
+func TestFiveHourAndWeeklyWindowsUseCadenceWhenSlotsAreSwapped(t *testing.T) {
+	fiveHourMinutes := int64(300)
+	weeklyMinutes := int64(10_080)
+	fiveHour := &RateLimitWindow{UsedPercent: 72, WindowDurationMins: &fiveHourMinutes}
+	weekly := &RateLimitWindow{UsedPercent: 31, WindowDurationMins: &weeklyMinutes}
+
+	gotFiveHour, gotWeekly := fiveHourAndWeeklyWindows(&RateLimits{
+		Primary: weekly, Secondary: fiveHour,
+	})
+	if gotFiveHour != fiveHour || gotWeekly != weekly {
+		t.Fatalf("windows were not normalized by cadence: five-hour=%#v weekly=%#v", gotFiveHour, gotWeekly)
+	}
+}
+
+func TestAggregateRateLimitsGroupsSwappedWindowsByCadence(t *testing.T) {
+	fiveHourMinutes := int64(300)
+	weeklyMinutes := int64(10_080)
+	limits, err := aggregateRateLimits([]AccountSnapshot{
+		{
+			ID: "one", Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 20, WindowDurationMins: &fiveHourMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 40, WindowDurationMins: &weeklyMinutes},
+			},
+		},
+		{
+			ID: "two", Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 60, WindowDurationMins: &weeklyMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 80, WindowDurationMins: &fiveHourMinutes},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.Primary == nil || limits.Primary.UsedPercent != 50 || duration(limits.Primary) != fiveHourMinutes {
+		t.Fatalf("expected 5-hour usage to average to 50%%, got %#v", limits.Primary)
+	}
+	if limits.Secondary == nil || limits.Secondary.UsedPercent != 50 || duration(limits.Secondary) != weeklyMinutes {
+		t.Fatalf("expected weekly usage to average to 50%%, got %#v", limits.Secondary)
+	}
+}
+
 func TestAggregateRateLimitsKeepsPoolAvailable(t *testing.T) {
 	weeklyMinutes := int64(10_080)
 	limits, err := aggregateRateLimits([]AccountSnapshot{
@@ -66,8 +110,8 @@ func TestAggregateRateLimitsKeepsPoolAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limits.Primary == nil || limits.Primary.UsedPercent != 60 {
-		t.Fatalf("expected pooled usage to average to 60%%, got %#v", limits.Primary)
+	if limits.Secondary == nil || limits.Secondary.UsedPercent != 60 {
+		t.Fatalf("expected pooled weekly usage to average to 60%%, got %#v", limits.Secondary)
 	}
 	if limits.RateLimitReachedType != nil {
 		t.Fatalf("pool should remain available while one account has capacity: %#v", limits)

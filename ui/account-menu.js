@@ -1,11 +1,16 @@
 function CodexMuxUsageModal({
+  initialAccountId,
   onClose,
 }) {
+  globalThis.__codexMuxRequestedUsageAccountId = initialAccountId || null;
   return (0, e7.jsx)(QLs, {
     defaultResetCreditsOpen: true,
     initialAvailableCount: 0,
     isRateLimitReached: false,
-    onClose,
+    onClose: () => {
+      delete globalThis.__codexMuxRequestedUsageAccountId;
+      onClose?.();
+    },
     onResetComplete: () => {},
   });
 }
@@ -15,7 +20,9 @@ function CodexMuxUseResetAccountState() {
     (account) => account.connected && account.enabled,
   );
   const [accounts, setAccounts] = kXc.useState(cachedAccounts);
-  const [selectedId, setSelectedId] = kXc.useState("primary");
+  const [selectedId, setSelectedId] = kXc.useState(
+    () => globalThis.__codexMuxRequestedUsageAccountId || "primary",
+  );
   const [resetCounts, setResetCounts] = kXc.useState({});
   const [loading, setLoading] = kXc.useState(cachedAccounts.length === 0);
 
@@ -52,6 +59,7 @@ function CodexMuxUseResetAccountState() {
       delete window.__codexMuxResetAccountId;
       delete window.__codexMuxSelectedUsageWindows;
       delete window.__codexMuxResetAccountSelector;
+      delete globalThis.__codexMuxRequestedUsageAccountId;
     },
     [],
   );
@@ -73,7 +81,6 @@ function CodexMuxUseResetAccountState() {
       onSelect: setSelectedId,
     },
   );
-
 }
 
 function CodexMuxResetAccountSelector({
@@ -163,7 +170,6 @@ function CodexMuxAccountMenu() {
   const [codeCopied, setCodeCopied] = kXc.useState(false);
   const [pairing, setPairing] = kXc.useState(null);
   const [expandedAccountId, setExpandedAccountId] = kXc.useState(null);
-  const [emailCopied, setEmailCopied] = kXc.useState(false);
   const loginAccountId = login?.accountId || null;
 
   const refresh = kXc.useCallback(async () => {
@@ -219,17 +225,6 @@ function CodexMuxAccountMenu() {
   const connected = accounts.filter(
     (account) => account.connected && account.enabled,
   );
-  const weeklyWindows = connected.map((account) =>
-    codexMuxWeeklyWindow(account.rateLimits),
-  );
-  const hasCompleteUsage =
-    connected.length > 0 && weeklyWindows.every((weekly) => weekly != null);
-  const totalRemaining = weeklyWindows.reduce(
-    (total, weekly) =>
-      total + (weekly == null ? 0 : Math.max(0, 100 - weekly.usedPercent)),
-    0,
-  );
-
   async function addSubscription(event) {
     event.preventDefault();
     if (busy) return;
@@ -290,17 +285,13 @@ function CodexMuxAccountMenu() {
     event.preventDefault();
     const next = expandedAccountId === account.id ? null : account.id;
     setExpandedAccountId(next);
-    setEmailCopied(false);
     if (next !== pairing?.accountId) setPairing(null);
   }
 
-  async function copyEmail(account, event) {
+  function switchAccount(account, event) {
     event.preventDefault();
-    if (!account.email) return;
-    try {
-      await navigator.clipboard.writeText(account.email);
-      setEmailCopied(true);
-    } catch {}
+    setExpandedAccountId(null);
+    BW(modalScope, CodexMuxUsageModal, { initialAccountId: account.id });
   }
 
   async function pairDevice(account, event) {
@@ -344,14 +335,14 @@ function CodexMuxAccountMenu() {
       _H,
       {
         LeftIcon: S2,
-        SubText: loading ? "Connecting subscriptions…" : undefined,
+        SubText: loading
+          ? "Connecting subscriptions…"
+          : "5-hour and weekly limits by account",
         rightIcon: (0, e7.jsx)("span", {
           className: "text-token-description-foreground tabular-nums",
           children: loading
             ? "…"
-            : hasCompleteUsage
-              ? `${Math.round(totalRemaining)}%`
-              : "–",
+            : `${connected.length} ${connected.length === 1 ? "account" : "accounts"}`,
         }),
         onSelect: () => BW(modalScope, CodexMuxUsageModal, {}),
         children: "Usage remaining",
@@ -366,8 +357,10 @@ function CodexMuxAccountMenu() {
   }
 
   for (const account of connected) {
+    const fiveHour = codexMuxFiveHourWindow(account.rateLimits);
     const weekly = codexMuxWeeklyWindow(account.rateLimits);
-    const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
+    const fiveHourRemaining = codexMuxRemainingPercent(fiveHour);
+    const weeklyRemaining = codexMuxRemainingPercent(weekly);
     rows.push(
       (0, e7.jsx)(
         _H,
@@ -382,9 +375,17 @@ function CodexMuxAccountMenu() {
             ? (0, e7.jsx)(CodexMuxMaskedEmail, { email: account.email })
             : account.planType || "ChatGPT subscription",
           className: "group",
-          rightIcon: (0, e7.jsx)("span", {
-            className: "text-token-description-foreground tabular-nums",
-            children: remaining == null ? "–" : `${Math.round(remaining)}%`,
+          rightIcon: (0, e7.jsxs)("span", {
+            className:
+              "flex shrink-0 flex-col items-end text-xs leading-4 text-token-description-foreground tabular-nums",
+            children: [
+              (0, e7.jsx)("span", {
+                children: `5h ${codexMuxPercentLabel(fiveHourRemaining)}`,
+              }),
+              (0, e7.jsx)("span", {
+                children: `Week ${codexMuxPercentLabel(weeklyRemaining)}`,
+              }),
+            ],
           }),
           onSelect: (event) => toggleAccount(account, event),
           children: account.planLabel
@@ -399,16 +400,12 @@ function CodexMuxAccountMenu() {
         (0, e7.jsx)(
           _H,
           {
-            LeftIcon: CodexMuxCopyIcon,
-            SubText: account.email
-              ? emailCopied
-                ? "Copied"
-                : account.email
-              : "No email on this account",
-            onSelect: (event) => copyEmail(account, event),
-            children: "Copy email address",
+            LeftIcon: CodexMuxSwitchIcon,
+            SubText: account.email || "View this subscription's usage",
+            onSelect: (event) => switchAccount(account, event),
+            children: "Switch to account",
           },
-          `codex-mux-account-${account.id}-email`,
+          `codex-mux-account-${account.id}-switch`,
         ),
       );
       if (pairing?.accountId === account.id) {
@@ -543,6 +540,13 @@ function codexMuxPairingErrorMessage(message) {
   return message;
 }
 
+function codexMuxRemainingPercent(window) {
+  return window == null ? null : Math.max(0, 100 - window.usedPercent);
+}
+
+function codexMuxPercentLabel(value) {
+  return value == null ? "–" : `${Math.round(value)}%`;
+}
 
 // Profile images are kept decoded between menu opens so rows render with
 // their avatars on the first frame instead of after a network round-trip.
@@ -596,6 +600,33 @@ function CodexMuxCopyIcon(props) {
           stroke: "currentColor",
           strokeWidth: 1.5,
           strokeLinecap: "round",
+        }),
+      ],
+    }),
+  });
+}
+
+function CodexMuxSwitchIcon(props) {
+  return (0, e7.jsx)("svg", {
+    viewBox: "0 0 20 20",
+    fill: "none",
+    "aria-hidden": true,
+    ...props,
+    children: (0, e7.jsxs)(e7.Fragment, {
+      children: [
+        (0, e7.jsx)("path", {
+          d: "M3.75 6.5h10.5m0 0-2.75-2.75M14.25 6.5l-2.75 2.75",
+          stroke: "currentColor",
+          strokeWidth: 1.5,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        }),
+        (0, e7.jsx)("path", {
+          d: "M16.25 13.5H5.75m0 0 2.75 2.75M5.75 13.5l2.75-2.75",
+          stroke: "currentColor",
+          strokeWidth: 1.5,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
         }),
       ],
     }),

@@ -120,11 +120,19 @@ async function codexMuxFilterUsageStatus(status) {
           ...rateLimit,
           primary_window: codexMuxPooledUsageWindow(
             rateLimit.primary_window,
-            pool.map((account) => account.rateLimits?.primary),
+            codexMuxWindowsForNativeCadence(
+              rateLimit.primary_window,
+              pool,
+              CODEX_MUX_FIVE_HOUR_WINDOW_MINS,
+            ),
           ),
           secondary_window: codexMuxPooledUsageWindow(
             rateLimit.secondary_window,
-            pool.map((account) => account.rateLimits?.secondary),
+            codexMuxWindowsForNativeCadence(
+              rateLimit.secondary_window,
+              pool,
+              CODEX_MUX_WEEKLY_WINDOW_MINS,
+            ),
           ),
         };
   if (!poolHasCapacity) return { ...status, rate_limit: pooledRateLimit };
@@ -155,6 +163,56 @@ function codexMuxPooledUsageWindow(window, accountWindows) {
     used_percent: usedPercent,
     reset_at: resetsAt ?? window.reset_at,
   };
+}
+
+const CODEX_MUX_FIVE_HOUR_WINDOW_MINS = 5 * 60;
+const CODEX_MUX_WEEKLY_WINDOW_MINS = 7 * 24 * 60;
+const CODEX_MUX_WINDOW_DURATION_TOLERANCE_MINS = 1;
+
+function codexMuxRateLimitWindows(rateLimits) {
+  return [rateLimits?.primary, rateLimits?.secondary].filter(Boolean);
+}
+
+function codexMuxWindowForDuration(rateLimits, targetMinutes) {
+  return (
+    codexMuxRateLimitWindows(rateLimits).find(
+      (window) =>
+        window.windowDurationMins != null &&
+        Math.abs(window.windowDurationMins - targetMinutes) <=
+          CODEX_MUX_WINDOW_DURATION_TOLERANCE_MINS,
+    ) || null
+  );
+}
+
+function codexMuxWindowsForNativeCadence(window, accounts, fallbackMinutes) {
+  const targetMinutes =
+    window?.limit_window_seconds == null
+      ? fallbackMinutes
+      : window.limit_window_seconds / 60;
+  return accounts
+    .map((account) =>
+      codexMuxWindowForDuration(account.rateLimits, targetMinutes),
+    )
+    .filter(Boolean);
+}
+
+function codexMuxFiveHourWindow(rateLimits) {
+  const exact = codexMuxWindowForDuration(
+    rateLimits,
+    CODEX_MUX_FIVE_HOUR_WINDOW_MINS,
+  );
+  if (exact) return exact;
+  if (codexMuxWindowForDuration(rateLimits, CODEX_MUX_WEEKLY_WINDOW_MINS)) {
+    return null;
+  }
+  const windows = codexMuxRateLimitWindows(rateLimits);
+  return (
+    windows.sort(
+      (left, right) =>
+        (left.windowDurationMins || 0) - (right.windowDurationMins || 0),
+    )[0] ||
+    null
+  );
 }
 
 async function codexMuxRateLimitResets(accountId) {
@@ -197,7 +255,15 @@ async function codexMuxStartRemoteControlPairing(accountId) {
 }
 
 function codexMuxWeeklyWindow(rateLimits) {
-  const windows = [rateLimits?.primary, rateLimits?.secondary].filter(Boolean);
+  const exact = codexMuxWindowForDuration(
+    rateLimits,
+    CODEX_MUX_WEEKLY_WINDOW_MINS,
+  );
+  if (exact) return exact;
+  if (codexMuxWindowForDuration(rateLimits, CODEX_MUX_FIVE_HOUR_WINDOW_MINS)) {
+    return null;
+  }
+  const windows = codexMuxRateLimitWindows(rateLimits);
   windows.sort(
     (left, right) =>
       (left.windowDurationMins || 0) - (right.windowDurationMins || 0),
@@ -206,8 +272,10 @@ function codexMuxWeeklyWindow(rateLimits) {
 }
 
 function codexMuxUsageWindows(rateLimits) {
-  return [rateLimits?.primary, rateLimits?.secondary]
-    .filter(Boolean)
+  const fiveHour = codexMuxFiveHourWindow(rateLimits);
+  const weekly = codexMuxWeeklyWindow(rateLimits);
+  return [fiveHour, weekly]
+    .filter((window, index, windows) => window && windows.indexOf(window) === index)
     .map((window) => ({
       usedPercent: window.usedPercent,
       remainingPercent: Math.max(0, 100 - window.usedPercent),
@@ -231,6 +299,7 @@ Object.assign(globalThis, {
   codexMuxRemoteControlStatus,
   codexMuxEnableRemoteControl,
   codexMuxStartRemoteControlPairing,
+  codexMuxFiveHourWindow,
   codexMuxWeeklyWindow,
   codexMuxUsageWindows,
 });

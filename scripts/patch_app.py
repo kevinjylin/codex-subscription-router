@@ -164,12 +164,38 @@ def resolve_signing_identity(allow_adhoc: bool) -> str:
 def signing_team_identifier(identity: str) -> str | None:
     if identity == "-":
         return None
-    match = re.search(r"\(([A-Z0-9]{10})\)$", identity)
-    if match is None:
-        raise RuntimeError(
-            "the signing identity must end with its 10-character Apple team ID"
+    # The parenthesized value in an Apple Development certificate's display
+    # name is not guaranteed to be its code-signing team. Sign a disposable
+    # Mach-O and let codesign report the TeamIdentifier it actually applied.
+    with tempfile.TemporaryDirectory(prefix=".codex-signing-team-") as temporary:
+        probe = Path(temporary) / "probe"
+        shutil.copyfile("/usr/bin/true", probe)
+        probe.chmod(0o755)
+        result = subprocess.run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                identity,
+                "--timestamp=none",
+                str(probe),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-    return match.group(1)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"could not use signing identity {identity!r}: {details}"
+            )
+        _, team = signed_code_metadata(probe)
+    if team is None:
+        raise RuntimeError(
+            f"signing identity {identity!r} did not produce an Apple team identifier"
+        )
+    return team
 
 
 def signed_code_metadata(path: Path) -> tuple[str | None, str | None]:
@@ -225,17 +251,26 @@ def ensure_components_are_stopped(paths: tuple[Path, ...]) -> None:
     for path in paths:
         if not path.exists():
             continue
+        executable_prefix = f"{path}/Contents/"
         result = subprocess.run(
-            ["pgrep", "-f", str(path)],
+            ["pgrep", "-f", executable_prefix],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            raise RuntimeError(
-                f"quit the running component before replacing it: {path}"
+        for process_id in result.stdout.split():
+            command = subprocess.run(
+                ["ps", "-p", process_id, "-o", "command="],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
+            if command.stdout.lstrip().startswith(executable_prefix):
+                raise RuntimeError(
+                    f"quit the running component before replacing it: {path}"
+                )
 
 
 MACH_O_MAGICS = {

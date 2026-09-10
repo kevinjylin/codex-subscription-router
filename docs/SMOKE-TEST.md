@@ -15,8 +15,10 @@ signature and reuse the same Apple team as the previous installed build.
 
 ## Accounts and routing
 
-- Connect at least two subscriptions and confirm photos, plans, masked emails,
-  pooled usage, and loading states.
+- Connect at least two Plus subscriptions and confirm photos, plans, masked
+  emails, and separate 5-hour and weekly usage for every account.
+- Expand an account, select *Switch to account*, and confirm the Usage sheet
+  opens with that subscription selected and both limit windows visible.
 - Start chats until each account has received one; confirm every follow-up stays
   on its original account.
 - Spoof one depleted account and confirm the thread continues on an account with
