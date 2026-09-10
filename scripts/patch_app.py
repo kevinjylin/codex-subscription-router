@@ -72,6 +72,7 @@ EXPECTED_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
     ("26.803.61601", "6396"): 49,
     ("26.810.52044", "6662"): 99,
     ("26.901.22334", "7746"): 49,
+    ("26.903.61454", "8378"): 49,
 }
 DEFAULT_CUA_SERVICE_LAYOUT = (("Codex Computer Use.app", 17),)
 EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD = {
@@ -81,13 +82,16 @@ EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD = {
         ("bin/mac/normal/Codex Computer Use.app", 13),
     ),
     ("26.901.22334", "7746"): DEFAULT_CUA_SERVICE_LAYOUT,
+    ("26.903.61454", "8378"): DEFAULT_CUA_SERVICE_LAYOUT,
 }
 EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS = 17
 EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
     ("26.803.61601", "6396"): 17,
     ("26.810.52044", "6662"): 20,
     ("26.901.22334", "7746"): 16,
+    ("26.903.61454", "8378"): 16,
 }
+BUILDS_REQUIRING_DEEP_RESIGN = {("26.903.61454", "8378")}
 
 
 def parse_args() -> argparse.Namespace:
@@ -695,8 +699,11 @@ def sign_independent_app(
     team_identifier: str | None,
     expected_cua_replacements: int = EXPECTED_CUA_IDENTIFIER_REPLACEMENTS,
     service_layout: tuple[tuple[str, int], ...] = DEFAULT_CUA_SERVICE_LAYOUT,
+    deep_resign_app: bool = False,
 ) -> None:
     """Apply one stable identity throughout the modified Electron bundle."""
+    desktop_executable = app / "Contents" / "MacOS" / "ChatGPT"
+    desktop_entitlements = sanitized_runtime_entitlements(desktop_executable)
     computer_use_entitlements = capture_computer_use_entitlements(app, service_layout)
     patch_computer_use_identity(
         app,
@@ -715,16 +722,44 @@ def sign_independent_app(
             str(app / "Contents" / "Resources" / "codex"),
         ]
     )
-    run(
+    app_signing_command = ["codesign"]
+    if deep_resign_app:
+        app_signing_command.append("--deep")
+    app_signing_command.extend(
         [
-            "codesign",
             "--force",
             "--sign",
             identity,
             "--timestamp=none",
-            str(app),
         ]
     )
+    if deep_resign_app and identity != "-":
+        app_signing_command.append(
+            "--preserve-metadata=identifier,entitlements,flags,runtime"
+        )
+    run([*app_signing_command, str(app)])
+    if deep_resign_app and identity == "-":
+        # Hardened ad-hoc child processes cannot load a separately ad-hoc-signed
+        # Electron framework: macOS treats their signatures as different teams.
+        # The deep pass deliberately removes hardened-runtime flags, then these
+        # shallow passes restore the stable desktop identifier and outer seal.
+        sign_runtime_executable(
+            desktop_executable,
+            identity,
+            OPENAI_DESKTOP_CODE_IDENTIFIER,
+            desktop_entitlements,
+            runtime=False,
+        )
+        run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                identity,
+                "--timestamp=none",
+                str(app),
+            ]
+        )
 
 
 def load_or_create_token() -> str:
@@ -1180,7 +1215,125 @@ RENDERER_BUILD_7746 = RendererBuild(
     ),
 )
 
-RENDERER_BUILDS = (RENDERER_BUILD_6396, RENDERER_BUILD_6662, RENDERER_BUILD_7746)
+# Build 8378 keeps the split renderer introduced in 7746, with re-minified
+# component, hook, and JSX identifiers throughout the affected surfaces.
+RENDERER_BUILD_8378 = RendererBuild(
+    marker=(
+        "function Sb(e,t){let n=e.get(Cb);"
+        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
+        "return n.forHost(t)}"
+    ),
+    ui_bundle_glob="app-primary-*.js",
+    data_anchor=(
+        "function Sb(e,t){let n=e.get(Cb);"
+        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
+        "return n.forHost(t)}"
+    ),
+    menu_identifiers={
+        "e7": "dq",
+        "kXc": "Pyn",
+        "Lo": "fo",
+        "Q": "HE",
+        "BW": "Zv",
+        "QLs": "tG",
+        "_H": "Qy",
+        "S2": "MG",
+        "CH": "of",
+        "jLa": "uB",
+        "lt": "vr",
+    },
+    menu_anchor="function wyn(e){let t=(0,Eyn.c)(35),",
+    usage_slot=("usageItems:wt", "usageItems:(0,dq.jsx)(CodexMuxAccountMenu,{})"),
+    plugin_request=RENDERER_BUILD_7746.plugin_request,
+    plugin_request_checks=RENDERER_BUILD_7746.plugin_request_checks,
+    reset_query=(
+        "function x5i(){let e=(0,lq.c)(1);dz(),sb(null);let t;return "
+        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:C5i,select:S5i,"
+        "refetchInterval:nD.ONE_MINUTE,staleTime:nD.FIVE_SECONDS},e[0]=t):"
+        "t=e[0],gb(t)}",
+        "function x5i(){dz(),sb(null);let e=window.__codexMuxResetAccountId;"
+        "return gb({queryKey:[`rate-limit-reset-credits`,e??`primary`],"
+        "queryFn:e?()=>codexMuxRateLimitResets(e):C5i,select:S5i,"
+        "refetchInterval:nD.ONE_MINUTE,staleTime:nD.FIVE_SECONDS})}",
+    ),
+    reset_mutation=(
+        "function w5i(){let e=(0,lq.c)(3),t=fb(),n=eD(),r;return "
+        "e[0]!==n||e[1]!==t?(r={mutationFn:T5i,onSuccess:(e,r)=>{"
+        "let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){"
+        "let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>s8i(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],yb(r)}",
+        "function w5i(){let e=fb(),t=eD(),n=window.__codexMuxResetAccountId,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return yb({"
+        "mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):T5i,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;"
+        "if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?"
+        "n.credit?.id??a:a;e.setQueryData(r,e=>s8i(e,o,t))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}",
+    ),
+    usage_modal="tG",
+    usage_header=(
+        "let ge;t[46]===me?ge=t[47]:"
+        "(ge=(0,eG.jsxs)(Eb,{children:[me,he]}),t[46]=me,t[47]=ge);",
+        "let ge=(0,eG.jsxs)(Eb,{children:[me,he,"
+        "window.__codexMuxResetAccountSelector??null]});",
+    ),
+    profile_avatar=(
+        "avatar:(0,$.jsxs)($.Fragment,{children:["
+        "(0,$.jsxs)(`label`,{\"aria-disabled\":B.isPending,"
+        "className:ue(`group relative flex size-20 rounded-full outline-none "
+        "focus-within:ring-1 focus-within:ring-ring`,",
+        "avatar:(0,$.jsxs)($.Fragment,{children:["
+        "globalThis.CodexMuxProfileAvatarStack?.("
+        "{onSelect:()=>M.refetch()})??null,"
+        "(0,$.jsxs)(`label`,{\"aria-disabled\":B.isPending,"
+        "className:ue(globalThis.CodexMuxProfileAvatarStack?`hidden`:"
+        "`group relative flex size-20 rounded-full outline-none "
+        "focus-within:ring-1 focus-within:ring-ring`,",
+    ),
+    profile_name=(
+        "displayName:Ue??(0,$.jsx)(J,{id:`profile.nameFallback`,"
+        "defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
+        "displayName:globalThis.__codexMuxSelectedProfileAccountId?"
+        "(Ue??(0,$.jsx)(J,{id:`profile.nameFallback`,"
+        "defaultMessage:`ChatGPT user`,"
+        "description:`Fallback profile display name`})):null",
+    ),
+    profile_identity=(
+        "username:Ve==null?null:(0,$.jsx)(J,{id:`profile.usernameValue`,"
+        "defaultMessage:`@{username}`,"
+        "description:`Profile username shown with an at-sign prefix`,"
+        "values:{username:Ve}})",
+        "username:globalThis.__codexMuxSelectedProfileAccountId&&Ve!=null?"
+        "(0,$.jsx)(J,{id:`profile.usernameValue`,"
+        "defaultMessage:`@{username}`,"
+        "description:`Profile username shown with an at-sign prefix`,"
+        "values:{username:Ve}}):null",
+    ),
+    plugin_bundle_glob="plugins-settings-*.js",
+    plugin_scope=RENDERER_BUILD_7746.plugin_scope,
+    thread_identifiers={
+        "$n": "ve",
+        "sr": "ds",
+        "TE": "XT",
+        "zE": "cE",
+        "K": "Z",
+    },
+    thread_anchor="function aE(){let e=(0,sE.c)(1),",
+    thread_sections=(
+        "children:[m,h,g,_,v,y,b,x]",
+        "children:[m,h,g,_,v,(0,cE.jsx)(CodexMuxThreadSubscription,{}),y,b,x]",
+    ),
+)
+
+RENDERER_BUILDS = (
+    RENDERER_BUILD_6396,
+    RENDERER_BUILD_6662,
+    RENDERER_BUILD_7746,
+    RENDERER_BUILD_8378,
+)
 
 USAGE_QUERY_PATTERN = re.compile(
     r"queryKey:\[`rate-limit-status`\],(?P<select>select:e=>e,)?"
@@ -1738,6 +1891,7 @@ def patch_app(
             team_identifier,
             expected_cua_identity_replacements,
             cua_service_layout,
+            (source_version, source_build) in BUILDS_REQUIRING_DEEP_RESIGN,
         )
         verify_signed_code(
             staged_app,
