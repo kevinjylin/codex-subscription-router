@@ -47,6 +47,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ### Fixed
 
+- The launcher now starts the patched app from the user's home directory, so
+  config and feature-precedence refreshes do not fail when it was invoked from
+  a directory that was later moved or deleted.
 - Every subscription can use the installed plugins: isolated homes share the
   Primary home's plugin package cache through a link (the old cache is set
   aside), so a plugin enabled in the shared config no longer sits uninstalled
