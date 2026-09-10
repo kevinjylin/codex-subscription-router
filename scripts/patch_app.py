@@ -66,6 +66,14 @@ TESTED_SOURCE_BUILDS = {
         "26.901.22334",
         "7746",
     ): "405f0e1600fc63851abe4c763ec0546f56c32da312c2c2745e2b997c579ce0d0",
+    (
+        "26.903.61454",
+        "8378",
+    ): "ce970dc84795cb12ee33cc6f4c6b918affc2e15602b051fdb3af04913d5056f1",
+    (
+        "26.903.71938",
+        "8576",
+    ): "58fef82480b9064e209b5b2fd934992e8d71515aea8084482369cfeaff1b8ee0",
 }
 EXPECTED_CUA_IDENTIFIER_REPLACEMENTS = 49
 EXPECTED_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
@@ -73,6 +81,7 @@ EXPECTED_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
     ("26.810.52044", "6662"): 99,
     ("26.901.22334", "7746"): 49,
     ("26.903.61454", "8378"): 49,
+    ("26.903.71938", "8576"): 49,
 }
 DEFAULT_CUA_SERVICE_LAYOUT = (("Codex Computer Use.app", 17),)
 EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD = {
@@ -83,6 +92,7 @@ EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD = {
     ),
     ("26.901.22334", "7746"): DEFAULT_CUA_SERVICE_LAYOUT,
     ("26.903.61454", "8378"): DEFAULT_CUA_SERVICE_LAYOUT,
+    ("26.903.71938", "8576"): DEFAULT_CUA_SERVICE_LAYOUT,
 }
 EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS = 17
 EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
@@ -90,8 +100,9 @@ EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
     ("26.810.52044", "6662"): 20,
     ("26.901.22334", "7746"): 16,
     ("26.903.61454", "8378"): 16,
+    ("26.903.71938", "8576"): 16,
 }
-BUILDS_REQUIRING_DEEP_RESIGN = {("26.903.61454", "8378")}
+BUILDS_REQUIRING_DEEP_RESIGN = {("26.903.61454", "8378"), ("26.903.71938", "8576")}
 
 
 def parse_args() -> argparse.Namespace:
@@ -1364,11 +1375,128 @@ RENDERER_BUILD_8378 = RendererBuild(
     ),
 )
 
+# Build 8576 re-minifies the split renderer and shifts the thread section locals.
+RENDERER_BUILD_8576 = RendererBuild(
+    marker=(
+        "function xb(e,t){let n=e.get(Sb);if(n==null)throw Error(`AppServerManager RPC is not"
+        " connected`);return n.forHost(t)}"
+    ),
+    ui_bundle_glob="app-primary-*.js",
+    data_anchor=(
+        "function xb(e,t){let n=e.get(Sb);if(n==null)throw Error(`AppServerManager RPC is not"
+        " connected`);return n.forHost(t)}"
+    ),
+    menu_identifiers={
+        "e7": "xK",
+        "kXc": "Obn",
+        "Lo": "Oe",
+        "Q": "zb",
+        "BW": "Hv",
+        "QLs": "tfn",
+        "_H": "Zy",
+        "S2": "iG",
+        "CH": "Rd",
+        "jLa": "Qz",
+        "lt": "Ai",
+    },
+    menu_anchor="function vbn(e){let t=(0,bbn.c)(35),",
+    usage_slot=(
+        "usageItems:wt",
+        "usageItems:(0,xK.jsx)(CodexMuxAccountMenu,{})",
+    ),
+    plugin_request=RENDERER_BUILD_7746.plugin_request,
+    plugin_request_checks=RENDERER_BUILD_7746.plugin_request_checks,
+    reset_query=(
+        (
+            "function j5i(){let e=(0,lq.c)(1);dz(),ob(null);let t;return e[0]===Symbol.for(`react"
+            ".memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:N5i,select:"
+            "M5i,refetchInterval:tD.ONE_MINUTE,staleTime:tD.FIVE_SECONDS},e[0]=t):t=e[0],hb(t)}"
+        ),
+        (
+            "function j5i(){dz(),ob(null);let e=window.__codexMuxResetAccountId;return hb({queryK"
+            "ey:[`rate-limit-reset-credits`,e??`primary`],queryFn:e?()=>codexMuxRateLimitResets(e"
+            "):N5i,select:M5i,refetchInterval:tD.ONE_MINUTE,staleTime:tD.FIVE_SECONDS})}"
+        ),
+    ),
+    reset_mutation=(
+        (
+            "function P5i(){let e=(0,lq.c)(3),t=db(),n=$E(),r;return e[0]!==n||e[1]!==t?(r={mutat"
+            "ionFn:F5i,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_"
+            "redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-rese"
+            "t-credits`],e=>_8i(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-rese"
+            "t-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],vb(r)}"
+        ),
+        (
+            "function P5i(){let e=db(),t=$E(),n=window.__codexMuxResetAccountId,r=[`rate-limit-re"
+            "set-credits`,n??`primary`];return vb({mutationFn:n?i=>codexMuxConsumeRateLimitReset("
+            "n,i):F5i,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_r"
+            "edeemed`){let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>_8i(e,o,t))}Promis"
+            "e.all([t([`rate-limit-status`]),t(r)])}})}"
+        ),
+    ),
+    usage_modal="tfn",
+    usage_header=(
+        "let ge;t[46]===me?ge=t[47]:(ge=(0,VW.jsxs)(bb,{children:[me,he]}),t[46]=me,t[47]=ge);",
+        "let ge=(0,VW.jsxs)(bb,{children:[me,he,window.__codexMuxResetAccountSelector??null]});",
+    ),
+    profile_avatar=(
+        (
+            "avatar:(0,$.jsxs)($.Fragment,{children:[(0,$.jsxs)(`label`,{\"aria-disabled\":V.isPend"
+            "ing,className:he(`group relative flex size-20 rounded-full outline-none "
+            "focus-within:ring-1 focus-within:ring-ring`,"
+        ),
+        (
+            "avatar:(0,$.jsxs)($.Fragment,{children:[globalThis.CodexMuxProfileAvatarStack?.({onS"
+            "elect:()=>N.refetch()})??null,(0,$.jsxs)(`label`,{\"aria-disabled\":V.isPending,classN"
+            "ame:he(globalThis.CodexMuxProfileAvatarStack?`hidden`:`group relative flex size-20 "
+            "rounded-full outline-none focus-within:ring-1 focus-within:ring-ring`,"
+        ),
+    ),
+    profile_name=(
+        (
+            "displayName:He??(0,$.jsx)(h,{id:`profile.nameFallback`,defaultMessage:`ChatGPT "
+            "user`,description:`Fallback profile display name`})"
+        ),
+        (
+            "displayName:globalThis.__codexMuxSelectedProfileAccountId?(He??(0,$.jsx)(h,{id:`prof"
+            "ile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile "
+            "display name`})):null"
+        ),
+    ),
+    profile_identity=(
+        (
+            "username:Ve==null?null:(0,$.jsx)(h,{id:`profile.usernameValue`,defaultMessage:`@{use"
+            "rname}`,description:`Profile username shown with an at-sign "
+            "prefix`,values:{username:Ve}})"
+        ),
+        (
+            "username:globalThis.__codexMuxSelectedProfileAccountId&&Ve!=null?(0,$.jsx)(h,{id:`pr"
+            "ofile.usernameValue`,defaultMessage:`@{username}`,description:`Profile username "
+            "shown with an at-sign prefix`,values:{username:Ve}}):null"
+        ),
+    ),
+    plugin_bundle_glob="plugins-settings-*.js",
+    plugin_scope=RENDERER_BUILD_7746.plugin_scope,
+    thread_identifiers={
+        "$n": "s",
+        "sr": "ps",
+        "TE": "XT",
+        "zE": "cE",
+        "K": "Z",
+    },
+    thread_anchor="function aE(){let e=(0,sE.c)(1),",
+    thread_sections=(
+        "children:[h,g,_,v,y,b,x,S]",
+        "children:[h,g,_,v,y,(0,cE.jsx)(CodexMuxThreadSubscription,{}),b,x,S]",
+    ),
+)
+
 RENDERER_BUILDS = (
     RENDERER_BUILD_6396,
     RENDERER_BUILD_6662,
     RENDERER_BUILD_7746,
     RENDERER_BUILD_8378,
+    RENDERER_BUILD_8576,
 )
 
 USAGE_QUERY_PATTERN = re.compile(
