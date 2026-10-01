@@ -28,6 +28,9 @@ type Options struct {
 	Environment    []string
 	Store          *state.Store
 	Output         io.Writer
+	// Trace, when set, receives one JSON line per routed request, its reply,
+	// and each dropped notification: methods, ids, and accounts, never payloads.
+	Trace io.Writer
 }
 
 type externalRoute struct {
@@ -58,6 +61,8 @@ type Multiplexer struct {
 	environment    []string
 	store          *state.Store
 	output         io.Writer
+	trace          io.Writer
+	traceMu        sync.Mutex
 
 	childrenMu sync.RWMutex
 	children   map[string]*backend.Child
@@ -96,6 +101,9 @@ type Multiplexer struct {
 	resetPreviewMu sync.RWMutex
 	resetPreviews  map[string]ResetCreditsPreview
 
+	mutedMu sync.Mutex
+	muted   map[mutedNotification]struct{}
+
 	selectionMu       sync.RWMutex
 	selectedAccountID string
 
@@ -112,6 +120,7 @@ func New(options Options) (*Multiplexer, error) {
 		environment:          append([]string(nil), options.Environment...),
 		store:                options.Store,
 		output:               options.Output,
+		trace:                options.Trace,
 		children:             make(map[string]*backend.Child),
 		inbound:              make(chan backend.Inbound, 1024),
 		externalRoutes:       make(map[string]externalRoute),
@@ -282,6 +291,9 @@ func (m *Multiplexer) routeNewThread(message protocol.Message) {
 		return
 	}
 	account, reason, err := m.chooseAccountExcluding(ctx, support.unsupported)
+	if preferred, ok := m.preferredAccount(ctx, support.unsupported); ok && m.SelectedAccount() == "" {
+		account, reason, err = preferred, RouteReason{Preferred: true}, nil
+	}
 	if err != nil {
 		if errors.Is(err, errNoSubscriptionCapacity) {
 			if support.native {
@@ -319,7 +331,7 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 	}
 	threadID := threadIDFromParams(message.Params)
 	if threadID != "" {
-		accountID, _ = m.store.ThreadOwner(threadID)
+		accountID, _ = m.threadOwner(threadID)
 	}
 	var move *sectionMove
 	if message.Method == "thread/section/move" {
@@ -380,6 +392,7 @@ func (m *Multiplexer) forwardRoute(route externalRoute) error {
 		return fmt.Errorf("account %s is unavailable", accountID)
 	}
 	key := protocol.RequestIDKey(message.ID)
+	m.traceEvent(traceRoute(message, key, accountID))
 	m.externalMu.Lock()
 	m.externalRoutes[key] = route
 	m.externalMu.Unlock()
@@ -435,15 +448,10 @@ func (m *Multiplexer) routeTurnStart(message protocol.Message, threadID, ownerID
 				m.write(refusal)
 				return
 			}
-			if err := m.resumeThreadOnAccount(ctx, threadID, ownerID, selected); err != nil {
+			if _, err := m.MoveThread(ctx, threadID, selected); err != nil {
 				m.write(protocol.Failure(message.ID, -32027, fmt.Sprintf("Cannot switch this task: %v. Wait for it to finish, or start a new task on the selected account.", err)))
 				return
 			}
-			if err := m.store.SetThreadOwner(threadID, selected); err != nil {
-				m.write(protocol.Failure(message.ID, -32028, err.Error()))
-				return
-			}
-			m.publish(Event{Type: "thread-failed-over", AccountID: selected, Data: map[string]any{"threadId": threadID}})
 			ownerID = selected
 		}
 	}
@@ -486,6 +494,7 @@ func (m *Multiplexer) failoverTurn(
 		m.write(protocol.Failure(message.ID, -32028, err.Error()))
 		return
 	}
+	m.releaseThread(ctx, sourceAccountID, threadID)
 	if err := m.forwardWithExclusions(fallback.ID, message, excluded); err != nil {
 		m.write(protocol.Failure(message.ID, -32023, err.Error()))
 		return
@@ -651,6 +660,11 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 		}
 		m.externalMu.Unlock()
 		if ok {
+			reply := map[string]any{"reply": route.method, "id": key, "account": inbound.AccountID}
+			if message.Error != nil {
+				reply["error"] = message.Error.Message
+			}
+			m.traceEvent(reply)
 			if route.method == "turn/start" && isUsageLimitResponse(message) {
 				m.snapshots.forget(inbound.AccountID)
 				go m.retryTurnAfterUsageLimit(route, inbound.AccountID)
@@ -688,9 +702,45 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 		message.Method == "account/updated" {
 		go m.publishAccountRefresh(inbound.AccountID)
 	}
-	if m.shouldForwardNotification(inbound.AccountID, message.Method) {
-		m.writeRaw(inbound.Raw)
+	if m.mutedNotification(inbound.AccountID, message.Params) {
+		return
 	}
+	if m.shouldForwardNotification(inbound.AccountID, message) {
+		m.writeRaw(inbound.Raw)
+		return
+	}
+	m.traceEvent(map[string]any{"dropped": message.Method, "account": inbound.AccountID})
+}
+
+// traceRoute names a routed request; for an MCP call it adds the server,
+// tool, or resource it targets, never the arguments.
+func traceRoute(message protocol.Message, key, accountID string) map[string]any {
+	fields := map[string]any{"routed": message.Method, "id": key, "account": accountID, "thread": threadIDFromParams(message.Params)}
+	if strings.HasPrefix(message.Method, "mcpServer/") {
+		var target struct {
+			Server string `json:"server"`
+			Tool   string `json:"tool"`
+			URI    string `json:"uri"`
+		}
+		if json.Unmarshal(message.Params, &target) == nil {
+			fields["server"], fields["tool"], fields["uri"] = target.Server, target.Tool, target.URI
+		}
+	}
+	return fields
+}
+
+func (m *Multiplexer) traceEvent(fields map[string]any) {
+	if m.trace == nil {
+		return
+	}
+	fields["at"] = time.Now().Format(time.RFC3339Nano)
+	line, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	m.traceMu.Lock()
+	defer m.traceMu.Unlock()
+	_, _ = m.trace.Write(append(line, '\n'))
 }
 
 func (m *Multiplexer) rememberRateLimitUpdate(accountID string, params json.RawMessage) {
@@ -751,16 +801,39 @@ func (m *Multiplexer) forwardServerRequest(inbound backend.Inbound) {
 	m.write(inbound.Message)
 }
 
-func (m *Multiplexer) shouldForwardNotification(accountID, method string) bool {
+// requestScopedNotifications only follow a request the desktop sent that
+// account: a command or process it runs, an MCP event stream it opened, or a
+// file search it started.
+var requestScopedNotifications = []string{
+	"command/exec/",
+	"process/",
+	"mcpServer/event/stream/",
+	"fuzzyFileSearch/",
+}
+
+// shouldForwardNotification passes on everything the controller says, and
+// from the other accounts whatever concerns one of their chats or answers a
+// request routed to them. Their account-wide notifications (skills, apps,
+// remote control) would repeat the controller's.
+func (m *Multiplexer) shouldForwardNotification(accountID string, message protocol.Message) bool {
 	controller, ok := m.store.Controller()
 	if ok && controller.ID == accountID {
 		return true
 	}
-	return strings.HasPrefix(method, "thread/") ||
-		strings.HasPrefix(method, "turn/") ||
-		strings.HasPrefix(method, "item/") ||
-		strings.HasPrefix(method, "hook/") ||
-		strings.HasPrefix(method, "rawResponse")
+	for _, prefix := range []string{"thread/", "turn/", "item/", "hook/", "rawResponse"} {
+		if strings.HasPrefix(message.Method, prefix) {
+			return true
+		}
+	}
+	if threadIDFromParams(message.Params) != "" {
+		return true
+	}
+	for _, prefix := range requestScopedNotifications {
+		if strings.HasPrefix(message.Method, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Multiplexer) learnThreadOwner(route externalRoute, accountID string, result json.RawMessage) {
@@ -849,6 +922,25 @@ func (m *Multiplexer) sectionFields(threadID, answeringAccountID string) (map[st
 		return nil, false
 	}
 	return m.sections.copies[threadID], true
+}
+
+// threadOwner is the subscription a chat belongs to: the recorded one or, for
+// a chat the router never saw start, the first account whose home holds its
+// rollout, which is recorded from then on.
+func (m *Multiplexer) threadOwner(threadID string) (string, bool) {
+	if owner, ok := m.store.ThreadOwner(threadID); ok {
+		return owner, true
+	}
+	for _, account := range m.store.Accounts() {
+		if len(threadRollouts(account.CodexHome, threadID)) == 0 {
+			continue
+		}
+		if err := m.store.SetThreadOwner(threadID, account.ID); err != nil {
+			return "", false
+		}
+		return account.ID, true
+	}
+	return "", false
 }
 
 func (m *Multiplexer) child(accountID string) (*backend.Child, bool) {
@@ -974,15 +1066,7 @@ func accountHasCapacity(snapshot AccountSnapshot) bool {
 	if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
 		return false
 	}
-	if snapshot.RateLimits == nil {
-		return true
-	}
-	for _, window := range []*RateLimitWindow{snapshot.RateLimits.Primary, snapshot.RateLimits.Secondary} {
-		if window != nil && window.UsedPercent >= 100 {
-			return false
-		}
-	}
-	return true
+	return windowCapacity(snapshot.RateLimits) || creditsAvailable(snapshot.RateLimits)
 }
 
 func isUsageLimitResponse(message protocol.Message) bool {

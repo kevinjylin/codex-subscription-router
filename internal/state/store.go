@@ -30,6 +30,9 @@ type persistedState struct {
 	Accounts     []Account           `json:"accounts"`
 	ThreadOwner  map[string]string   `json:"threadOwner"`
 	SectionOrder map[string][]string `json:"sectionOrder,omitempty"`
+	// PreferredAccount is the subscription new chats start on when the user
+	// picked one in the composer; empty means the router chooses.
+	PreferredAccount string `json:"preferredAccount,omitempty"`
 }
 
 // Store persists only routing metadata. OAuth credentials and conversation
@@ -42,6 +45,7 @@ type Store struct {
 	accounts         []Account
 	owners           map[string]string
 	sections         map[string][]string
+	preferred        string
 }
 
 func Open(root, primaryCodexHome string) (*Store, error) {
@@ -79,6 +83,7 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 		if persisted.SectionOrder != nil {
 			store.sections = persisted.SectionOrder
 		}
+		store.preferred = persisted.PreferredAccount
 	case errors.Is(err, os.ErrNotExist):
 		store.accounts = []Account{{
 			ID:         "primary",
@@ -95,7 +100,7 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 		return nil, fmt.Errorf("read state: %w", err)
 	}
 	for _, account := range store.accounts {
-		if samePath(account.CodexHome, primaryCodexHome) {
+		if !store.isolatedHome(account.CodexHome) {
 			continue
 		}
 		if err := syncIsolatedConfig(primaryCodexHome, account.CodexHome); err != nil {
@@ -120,7 +125,7 @@ func (s *Store) SyncManagedConfig() error {
 	s.mu.RUnlock()
 
 	for _, account := range accounts {
-		if samePath(account.CodexHome, primaryCodexHome) {
+		if !s.isolatedHome(account.CodexHome) {
 			continue
 		}
 		if err := syncIsolatedConfig(primaryCodexHome, account.CodexHome); err != nil {
@@ -139,6 +144,10 @@ func (s *Store) Accounts() []Account {
 func (s *Store) Account(id string) (Account, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.accountLocked(id)
+}
+
+func (s *Store) accountLocked(id string) (Account, bool) {
 	for _, account := range s.accounts {
 		if account.ID == id {
 			return account, true
@@ -234,6 +243,14 @@ func (s *Store) PruneAbandonedAccounts(now time.Time) ([]Account, error) {
 	return pruned, nil
 }
 
+// isolatedHome reports whether a Codex home is one this store created under
+// its accounts directory. Only such homes are ever rewritten from the
+// Primary home; a user's own home is never treated as isolated, whatever
+// CODEX_HOME the process was started with.
+func (s *Store) isolatedHome(codexHome string) bool {
+	return within(codexHome, filepath.Join(s.root, "accounts"))
+}
+
 func within(path, root string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != "." && !strings.HasPrefix(relative, "..")
@@ -286,6 +303,31 @@ func (s *Store) SetThreadOwner(threadID, accountID string) error {
 		return nil
 	}
 	s.owners[threadID] = accountID
+	return s.saveLocked()
+}
+
+// PreferredAccount is the subscription the user chose for new chats, or
+// empty when the router should choose.
+func (s *Store) PreferredAccount() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.preferred
+}
+
+// SetPreferredAccount records the subscription new chats should start on.
+// An empty id returns the choice to the router.
+func (s *Store) SetPreferredAccount(accountID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if accountID != "" {
+		if _, ok := s.accountLocked(accountID); !ok {
+			return fmt.Errorf("unknown account %q", accountID)
+		}
+	}
+	if s.preferred == accountID {
+		return nil
+	}
+	s.preferred = accountID
 	return s.saveLocked()
 }
 
@@ -363,10 +405,11 @@ func (s *Store) ThreadCounts() map[string]int {
 
 func (s *Store) saveLocked() error {
 	persisted := persistedState{
-		Version:      stateVersion,
-		Accounts:     s.accounts,
-		ThreadOwner:  s.owners,
-		SectionOrder: s.sections,
+		Version:          stateVersion,
+		Accounts:         s.accounts,
+		ThreadOwner:      s.owners,
+		SectionOrder:     s.sections,
+		PreferredAccount: s.preferred,
 	}
 	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {

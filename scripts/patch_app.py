@@ -11,6 +11,7 @@ import plistlib
 import re
 import secrets
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -44,6 +45,9 @@ LAUNCH_SERVICES_REGISTER = Path(
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
     "LaunchServices.framework/Support/lsregister"
 )
+# Marks the __asar_integrity section Electron 154 compiles into its framework:
+# an enabled flag, a format version, and a digest of Info.plist's integrity entry.
+ASAR_INTEGRITY_SENTINEL = b"AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A"
 ASAR_UNPACK_DIRECTORIES = (
     "node_modules/{@worklouder,better-sqlite3,node-mac-permissions,node-pty,objc-js}"
 )
@@ -53,56 +57,33 @@ PREFERRED_SIGNING_IDENTITY_PREFIXES = (
 )
 OPENAI_INTERNAL_TEAM_IDENTIFIER = "HX7739G8FX"
 OPENAI_DISTRIBUTION_TEAM_IDENTIFIER = "2DC432GLL2"
-TESTED_SOURCE_BUILDS = {
-    (
-        "26.803.61601",
-        "6396",
-    ): "d5a44ed9e2f1db5f81dbbe85408aed256f3203c5b16f00817bb9d7cd941343cf",
-    (
-        "26.810.52044",
-        "6662",
-    ): "6e7e8791b8bf69a586ff994721fff518af391d9efdc66cd2e620dd2a4aedc90f",
-    (
-        "26.901.22334",
-        "7746",
-    ): "405f0e1600fc63851abe4c763ec0546f56c32da312c2c2745e2b997c579ce0d0",
-    (
-        "26.903.61454",
-        "8378",
-    ): "ce970dc84795cb12ee33cc6f4c6b918affc2e15602b051fdb3af04913d5056f1",
-    (
-        "26.903.71938",
-        "8576",
-    ): "58fef82480b9064e209b5b2fd934992e8d71515aea8084482369cfeaff1b8ee0",
-}
-EXPECTED_CUA_IDENTIFIER_REPLACEMENTS = 49
-EXPECTED_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
-    ("26.803.61601", "6396"): 49,
-    ("26.810.52044", "6662"): 99,
-    ("26.901.22334", "7746"): 49,
-    ("26.903.61454", "8378"): 49,
-    ("26.903.71938", "8576"): 49,
-}
-DEFAULT_CUA_SERVICE_LAYOUT = (("Codex Computer Use.app", 17),)
-EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD = {
-    ("26.803.61601", "6396"): DEFAULT_CUA_SERVICE_LAYOUT,
-    ("26.810.52044", "6662"): (
-        ("Codex Computer Use.app", 17),
-        ("bin/mac/normal/Codex Computer Use.app", 13),
+
+
+@dataclass(frozen=True)
+class SourceBuild:
+    """What one official build must contain before it is patched."""
+
+    asar_sha256: str
+    cua_identifier_replacements: int = 49
+    asar_cua_identifier_replacements: int = 16
+    cua_service_layout: tuple[tuple[str, int], ...] = (("Codex Computer Use.app", 17),)
+
+
+# The newest three official builds, keyed by (version, build). Adding a build
+# removes the oldest one here and its RENDERER_BUILD profile.
+SUPPORTED_BUILDS = {
+    ("26.928.20755", "12246"): SourceBuild(
+        "2301fba40bd8fa237ccdb1369363e1deefaf27953da2d767d428225d5e9eedee"
     ),
-    ("26.901.22334", "7746"): DEFAULT_CUA_SERVICE_LAYOUT,
-    ("26.903.61454", "8378"): DEFAULT_CUA_SERVICE_LAYOUT,
-    ("26.903.71938", "8576"): DEFAULT_CUA_SERVICE_LAYOUT,
+    ("26.928.21956", "12404"): SourceBuild(
+        "3bda98f2265ad23677dfe0163d1cc7855beade6bef11d27f830f6663d7658406"
+    ),
+    ("26.928.31416", "12553"): SourceBuild(
+        "9d4dda5c04d42e32cbd378557359c8c06fa798805a3c991f8a7b4b2295a8b732"
+    ),
 }
-EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS = 17
-EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD = {
-    ("26.803.61601", "6396"): 17,
-    ("26.810.52044", "6662"): 20,
-    ("26.901.22334", "7746"): 16,
-    ("26.903.61454", "8378"): 16,
-    ("26.903.71938", "8576"): 16,
-}
-BUILDS_REQUIRING_DEEP_RESIGN = {("26.903.61454", "8378"), ("26.903.71938", "8576")}
+# Counts assumed for a build passed with --allow-untested-source.
+UNTESTED_BUILD = SourceBuild(asar_sha256="")
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +95,18 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Replace an existing destination after moving it to a timestamped backup.",
+    )
+    parser.add_argument(
+        "--stage",
+        type=Path,
+        help="Build for --destination but leave the app pair in this directory "
+        "instead of replacing the installed one; the app may keep running.",
+    )
+    parser.add_argument(
+        "--install-staged",
+        type=Path,
+        metavar="STAGE",
+        help="Install the pair a --stage run left in STAGE; the app must be quit.",
     )
     parser.add_argument(
         "--allow-adhoc-signing",
@@ -175,38 +168,12 @@ def resolve_signing_identity(allow_adhoc: bool) -> str:
 def signing_team_identifier(identity: str) -> str | None:
     if identity == "-":
         return None
-    # The parenthesized value in an Apple Development certificate's display
-    # name is not guaranteed to be its code-signing team. Sign a disposable
-    # Mach-O and let codesign report the TeamIdentifier it actually applied.
-    with tempfile.TemporaryDirectory(prefix=".codex-signing-team-") as temporary:
-        probe = Path(temporary) / "probe"
-        shutil.copyfile("/usr/bin/true", probe)
-        probe.chmod(0o755)
-        result = subprocess.run(
-            [
-                "codesign",
-                "--force",
-                "--sign",
-                identity,
-                "--timestamp=none",
-                str(probe),
-            ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            details = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(
-                f"could not use signing identity {identity!r}: {details}"
-            )
-        _, team = signed_code_metadata(probe)
-    if team is None:
+    match = re.search(r"\(([A-Z0-9]{10})\)$", identity)
+    if match is None:
         raise RuntimeError(
-            f"signing identity {identity!r} did not produce an Apple team identifier"
+            "the signing identity must end with its 10-character Apple team ID"
         )
-    return team
+    return match.group(1)
 
 
 def signed_code_metadata(path: Path) -> tuple[str | None, str | None]:
@@ -258,30 +225,54 @@ def existing_signing_team(path: Path) -> str | None:
     return team
 
 
+def pgrep_literal(text: str) -> str:
+    """Escape a path for pgrep's extended regular expressions."""
+    return re.sub(r"([][.^$*+?(){}|\\])", r"\\\1", text)
+
+
+# Helpers that outlive the app: Chromium's crash reporters and the desktop's
+# modifier-key monitor. They hold no state and are ended when the bundle is replaced.
+LINGERING_HELPERS = ("crashpad_handler", "bare-modifier-monitor")
+
+
+def bundle_processes(path: Path) -> list[tuple[int, str]]:
+    result = subprocess.run(
+        ["pgrep", "-fl", pgrep_literal(str(path))],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    processes = []
+    for line in result.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit():
+            processes.append((int(pid), command))
+    return processes
+
+
+def running_components(path: Path) -> list[str]:
+    return [
+        command for _, command in bundle_processes(path)
+        if not any(helper in command for helper in LINGERING_HELPERS)
+    ]
+
+
+def stop_lingering_helpers(path: Path) -> None:
+    for pid, command in bundle_processes(path):
+        if any(helper in command for helper in LINGERING_HELPERS):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
 def ensure_components_are_stopped(paths: tuple[Path, ...]) -> None:
     for path in paths:
-        if not path.exists():
-            continue
-        executable_prefix = f"{path}/Contents/"
-        result = subprocess.run(
-            ["pgrep", "-f", executable_prefix],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for process_id in result.stdout.split():
-            command = subprocess.run(
-                ["ps", "-p", process_id, "-o", "command="],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+        if path.exists() and running_components(path):
+            raise RuntimeError(
+                f"quit the running component before replacing it: {path}"
             )
-            if command.stdout.lstrip().startswith(executable_prefix):
-                raise RuntimeError(
-                    f"quit the running component before replacing it: {path}"
-                )
 
 
 MACH_O_MAGICS = {
@@ -359,7 +350,8 @@ def computer_use_package(app: Path) -> Path:
 
 
 def retire_stale_cached_computer_use_app() -> None:
-    """Move aside only a prior custom helper copied into the shared Codex home."""
+    """Remove only a prior custom helper copied into the shared Codex home;
+    every install ships its own."""
     cached_app = (
         Path.home() / ".codex" / "computer-use" / "Codex Computer Use.app"
     )
@@ -375,18 +367,15 @@ def retire_stale_cached_computer_use_app() -> None:
         return
     if LAUNCH_SERVICES_REGISTER.is_file():
         run([str(LAUNCH_SERVICES_REGISTER), "-u", str(cached_app)])
-    backup = cached_app.with_name(
-        f"Codex Computer Use backup-{time.strftime('%Y%m%d-%H%M%S')}"
-    )
-    cached_app.rename(backup)
-    print(f"Stale cached Computer Use helper moved to {backup}")
+    shutil.rmtree(cached_app)
+    print(f"Stale cached Computer Use helper removed from {cached_app}")
 
 
 def patch_computer_use_identity(
     app: Path,
     team_identifier: str | None,
-    expected_replacements: int = EXPECTED_CUA_IDENTIFIER_REPLACEMENTS,
-    service_layout: tuple[tuple[str, int], ...] = DEFAULT_CUA_SERVICE_LAYOUT,
+    expected_replacements: int = UNTESTED_BUILD.cua_identifier_replacements,
+    service_layout: tuple[tuple[str, int], ...] = UNTESTED_BUILD.cua_service_layout,
 ) -> None:
     """Give the copied CUA service an independent identity and trusted callers."""
     package = computer_use_package(app)
@@ -487,7 +476,7 @@ def patch_computer_use_identity(
 
 def patch_asar_computer_use_identity(
     extracted: Path,
-    expected_replacements: int = EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS,
+    expected_replacements: int = UNTESTED_BUILD.asar_cua_identifier_replacements,
 ) -> None:
     """Keep desktop launch, temp-file, and service references on the new CUA ID."""
     replacements = 0
@@ -658,7 +647,7 @@ def sign_runtime_bundle(
 
 def capture_computer_use_entitlements(
     app: Path,
-    service_layout: tuple[tuple[str, int], ...] = DEFAULT_CUA_SERVICE_LAYOUT,
+    service_layout: tuple[tuple[str, int], ...] = UNTESTED_BUILD.cua_service_layout,
 ) -> dict[Path, dict[str, object] | None]:
     package = computer_use_package(app)
     entitlements: dict[Path, dict[str, object] | None] = {}
@@ -682,7 +671,7 @@ def sign_computer_use_code(
     app: Path,
     identity: str,
     preserved_entitlements: dict[Path, dict[str, object] | None],
-    service_layout: tuple[tuple[str, int], ...] = DEFAULT_CUA_SERVICE_LAYOUT,
+    service_layout: tuple[tuple[str, int], ...] = UNTESTED_BUILD.cua_service_layout,
 ) -> None:
     """Keep the Computer Use service and its callers on one signing team."""
     resources = app / "Contents" / "Resources"
@@ -739,19 +728,24 @@ def sign_computer_use_code(
     )
 
 
+def codex_cli_app(resources: Path) -> Path:
+    """The packaged Codex CLI app whose `codex` executable the desktop launches."""
+    return resources / "codex-cli" / "CodexCLI.app"
+
+
+def codex_entrypoint(resources: Path) -> Path:
+    return codex_cli_app(resources) / "Contents" / "MacOS" / "codex"
+
+
 def sign_independent_app(
     app: Path,
     identity: str,
     team_identifier: str | None,
-    expected_cua_replacements: int = EXPECTED_CUA_IDENTIFIER_REPLACEMENTS,
-    service_layout: tuple[tuple[str, int], ...] = DEFAULT_CUA_SERVICE_LAYOUT,
-    deep_resign_app: bool = False,
+    expected_cua_replacements: int = UNTESTED_BUILD.cua_identifier_replacements,
+    service_layout: tuple[tuple[str, int], ...] = UNTESTED_BUILD.cua_service_layout,
 ) -> None:
     """Apply one stable identity throughout the modified Electron bundle."""
-    desktop_executable = app / "Contents" / "MacOS" / "ChatGPT"
-    desktop_entitlements = sanitized_runtime_entitlements(desktop_executable)
     computer_use_entitlements = capture_computer_use_entitlements(app, service_layout)
-    patch_native_pipe_signing_team(app, identity, team_identifier)
     patch_computer_use_identity(
         app,
         team_identifier,
@@ -759,6 +753,12 @@ def sign_independent_app(
         service_layout,
     )
     sign_computer_use_code(app, identity, computer_use_entitlements, service_layout)
+    resources = app / "Contents" / "Resources"
+    # A re-sealed CLI app no longer matches its profile, so the official binary
+    # keeps only the runtime entitlements it needs to run.
+    (codex_cli_app(resources) / "Contents" / "embedded.provisionprofile").unlink(missing_ok=True)
+    sign_runtime_executable(codex_entrypoint(resources).with_name("codex.real"), identity)
+    run(["codesign", "--force", "--sign", identity, "--timestamp=none", str(codex_cli_app(resources))])
     run(
         [
             "codesign",
@@ -766,47 +766,9 @@ def sign_independent_app(
             "--sign",
             identity,
             "--timestamp=none",
-            str(app / "Contents" / "Resources" / "codex"),
+            str(app),
         ]
     )
-    app_signing_command = ["codesign"]
-    if deep_resign_app:
-        app_signing_command.append("--deep")
-    app_signing_command.extend(
-        [
-            "--force",
-            "--sign",
-            identity,
-            "--timestamp=none",
-        ]
-    )
-    if deep_resign_app and identity != "-":
-        app_signing_command.append(
-            "--preserve-metadata=identifier,entitlements,flags,runtime"
-        )
-    run([*app_signing_command, str(app)])
-    if deep_resign_app and identity == "-":
-        # Hardened ad-hoc child processes cannot load a separately ad-hoc-signed
-        # Electron framework: macOS treats their signatures as different teams.
-        # The deep pass deliberately removes hardened-runtime flags, then these
-        # shallow passes restore the stable desktop identifier and outer seal.
-        sign_runtime_executable(
-            desktop_executable,
-            identity,
-            OPENAI_DESKTOP_CODE_IDENTIFIER,
-            desktop_entitlements,
-            runtime=False,
-        )
-        run(
-            [
-                "codesign",
-                "--force",
-                "--sign",
-                identity,
-                "--timestamp=none",
-                str(app),
-            ]
-        )
 
 
 def load_or_create_token() -> str:
@@ -899,7 +861,6 @@ class RendererBuild:
     """
 
     marker: str
-    ui_bundle_glob: str
     data_anchor: str
     menu_identifiers: dict[str, str]
     menu_anchor: str
@@ -909,610 +870,356 @@ class RendererBuild:
     reset_query: tuple[str, str]
     reset_mutation: tuple[str, str]
     usage_modal: str
+    usage_windows: str
     usage_header: tuple[str, str]
     profile_avatar: tuple[str, str]
     profile_name: tuple[str, str]
     profile_identity: tuple[str, str]
-    plugin_bundle_glob: str
     plugin_scope: tuple[str, str]
     thread_identifiers: dict[str, str]
     thread_anchor: str
     thread_sections: tuple[str, str]
+    composer_actions: tuple[str, ...]
+    fork_titles: tuple[str, str]
+    fork_identifiers: dict[str, str]
+    # Snippets that exist once in the build and name identifiers the
+    # injected sources borrow; the porting tool reads them, the patcher
+    # verifies them.
+    identifier_probes: tuple[str, ...]
+    usage_status: tuple[str, str]
 
 
-RENDERER_BUILD_6396 = RendererBuild(
-    marker="function wXc({sidebarFooter:e,triggerButton:t})",
-    ui_bundle_glob="app-initial-*.js",
-    data_anchor="function wXc({sidebarFooter:e,triggerButton:t})",
-    menu_identifiers={},
-    menu_anchor="function wXc({sidebarFooter:e,triggerButton:t})",
-    usage_slot=("usageItems:Ge", "usageItems:(0,e7.jsx)(CodexMuxAccountMenu,{})"),
-    plugin_request=(
-        "function gm(e,t,n){return n==null?h6e.sendRequest(e,t):"
-        "h6e.sendRequest(e,t,n)}",
-        "function gm(e,t,n){let r=codexMuxScopePluginRequest(e,t);"
-        "return n==null?h6e.sendRequest(e,r):h6e.sendRequest(e,r,n)}",
-    ),
-    plugin_request_checks=(
-        '"list-apps":q9((e,{priority:t,source:n,timeoutMs:r,'
-        "trace:i,...a})=>e.sendRequest(`app/list`,a,",
-        '"list-installed-apps":q9((e,t)=>e.sendRequest(`app/installed`,t))',
-        '"read-apps":q9((e,t)=>e.sendRequest(`app/read`,t))',
-        '"login-mcp-server":q9((e,t)=>e.sendRequest(`mcpServer/oauth/login`,t))',
-        '"list-mcp-server-status":K9((e,{priority:t,'
-        "source:n,timeoutMs:r,trace:i,...a})=>e.listMcpServers(a,",
-        "listMcpServers(e,t){let n=JSON.stringify({options:t,params:e})",
-        "let i=this.sendRequest(`mcpServerStatus/list`,e,t);",
-    ),
-    reset_query=(
-        "function l6r(){let e=(0,$F.c)(1),t;return "
-        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
-        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:u6r,"
-        "refetchInterval:vm.ONE_MINUTE,staleTime:vm.FIVE_SECONDS},e[0]=t):"
-        "t=e[0],Lt(t)}",
-        "function l6r(){let e=window.__codexMuxResetAccountId;return Lt({"
-        "queryKey:[`rate-limit-reset-credits`,e??`primary`],"
-        "queryFn:e?()=>codexMuxRateLimitResets(e):u6r,"
-        "refetchInterval:vm.ONE_MINUTE,staleTime:vm.FIVE_SECONDS})}",
-    ),
-    reset_mutation=(
-        "function d6r(){let e=(0,$F.c)(3),t=lt(),n=zO(),r;return "
-        "e[0]!==n||e[1]!==t?(r={mutationFn:f6r,onSuccess:(e,r)=>{"
-        "let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){"
-        "let n=e.code===`reset`?e.credit?.id??i:i;"
-        "t.setQueryData([`rate-limit-reset-credits`],e=>F3r(e,a,n))}"
-        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
-        "e[0]=n,e[1]=t,e[2]=r):r=e[2],$t(r)}",
-        "function d6r(){let e=lt(),t=zO(),n=window.__codexMuxResetAccountId,"
-        "r=[`rate-limit-reset-credits`,n??`primary`];return $t({"
-        "mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):f6r,"
-        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;"
-        "if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?"
-        "n.credit?.id??a:a;e.setQueryData(r,e=>F3r(e,o,t))}"
-        "Promise.all([t([`rate-limit-status`]),t(r)])}})}",
-    ),
-    usage_modal="QLs",
-    usage_header=(
-        "let ve;t[46]===ge?ve=t[47]:"
-        "(ve=(0,k2.jsxs)(LL,{children:[ge,_e]}),t[46]=ge,t[47]=ve);",
-        "let ve=(0,k2.jsxs)(LL,{children:[ge,_e,"
-        "window.__codexMuxResetAccountSelector??null]});",
-    ),
-    profile_avatar=(
-        "children:[(0,$.jsxs)(`div`,{className:`relative mb-4 size-20`,"
-        "children:[",
-        "children:[globalThis.CodexMuxProfileAvatarStack?.("
-        "{onSelect:()=>A.refetch()})??null,"
-        "(0,$.jsxs)(`div`,{className:"
-        "globalThis.CodexMuxProfileAvatarStack?"
-        "`hidden`:`relative mb-4 size-20`,children:[",
-    ),
-    profile_name=(
-        "className:`flex w-full justify-center`",
-        "className:globalThis.__codexMuxSelectedProfileAccountId&&"
-        "!A.isFetching?`flex w-full justify-center`:`hidden`",
-    ),
-    profile_identity=(
-        "className:`mt-1 flex min-h-7 items-center gap-1.5 text-base leading-5 "
-        "font-normal text-token-text-tertiary`",
-        "className:globalThis.__codexMuxSelectedProfileAccountId&&"
-        "!A.isFetching?`mt-1 flex min-h-7 items-center gap-1.5 text-base "
-        "leading-5 font-normal text-token-text-tertiary`:`hidden`",
-    ),
-    plugin_bundle_glob="plugins-settings-*.js",
-    plugin_scope=(
-        "action:F,children:w})",
-        "action:F,children:[globalThis.CodexMuxPluginScope?.()??null,w]})",
-    ),
-    thread_identifiers={},
-    thread_anchor="function bE(){let e=(0,wE.c)(57)",
-    thread_sections=(
-        "children:[c,l,u,d,f,p,m,h,g,_,v,y,b,x]",
-        "children:[c,l,u,d,f,(0,zE.jsx)(CodexMuxThreadSubscription,{}),"
-        "p,m,h,g,_,v,y,b,x]",
-    ),
-)
-
-RENDERER_BUILD_6662 = RendererBuild(
-    marker="function Icl(e){let t=(0,Vcl.c)(248),",
-    ui_bundle_glob="app-initial-*.js",
-    data_anchor="function Icl(e){let t=(0,Vcl.c)(248),",
+RENDERER_BUILD_12246 = RendererBuild(
+    marker="function qP(e,t){let n=e.get(JP);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}",
+    data_anchor="function qP(e,t){let n=e.get(JP);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}",
     menu_identifiers={
-        "e7": "$5",
-        "kXc": "Hcl",
-        "Lo": "Fo",
-        "BW": "RU",
-        "QLs": "E$s",
-        "_H": "GV",
-        "S2": "E0",
-        "CH": "ZV",
-        "jLa": "x$a",
-        "lt": "ct",
+        "e7": "$()",
+        "kXc": "Yh()",
+        "Lo": "Pe",
+        "Q": "Z",
+        "BW": "qHt",
+        "QLs": "hDi",
+        "_H": "HJe",
+        "CH": "lf",
+        "jLa": "bza",
+        "lt": "Qa",
+        "Rv": "sh",
+        "RD": "jd()",
     },
-    menu_anchor="function Icl(e){let t=(0,Vcl.c)(248),",
-    usage_slot=("usageItems:Ct", "usageItems:(0,$5.jsx)(CodexMuxAccountMenu,{})"),
+    menu_anchor="function bza(e,t){return xza(e,t).src}",
+    usage_slot=(
+        "(O=(0,$.jsx)(Pi,{accountIcon:s,accountSwitcher:Fn,additionalItems:g,displayName:y,hasWorkspaceAccount:l,identityItems:b,isPetVisible:d,onCloseMenu:o,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:vn,onOpenWorkspaceSettings:E,personalPlanLabel:p,onTogglePet:D,petShortcut:Ze,settingsShortcut:Xe,usageItems:Jn})",
+        "(O=(0,$.jsx)(Pi,{accountIcon:s,accountSwitcher:Fn,additionalItems:g,displayName:y,hasWorkspaceAccount:l,identityItems:b,isPetVisible:d,onCloseMenu:o,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:vn,onOpenWorkspaceSettings:E,personalPlanLabel:p,onTogglePet:D,petShortcut:Ze,settingsShortcut:Xe,usageItems:(0,$.jsx)(globalThis.CodexMuxAccountMenu,{})})",
+    ),
     plugin_request=(
-        "function Bp(e,t,n){return n==null?N8e.sendRequest(e,t):"
-        "N8e.sendRequest(e,t,n)}",
-        "function Bp(e,t,n){let r=codexMuxScopePluginRequest(e,t);"
-        "return n==null?N8e.sendRequest(e,r):N8e.sendRequest(e,r,n)}",
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?",
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);t=codexMuxScopePluginRequest(e,t);return e===`config/read`?",
     ),
     plugin_request_checks=(
-        '"list-apps":J9((e,{priority:t,source:n,timeoutMs:r,'
-        "trace:i,...a})=>e.sendRequest(`app/list`,a,",
-        '"list-installed-apps":J9((e,t)=>e.sendRequest(`app/installed`,t))',
-        '"read-apps":J9((e,t)=>e.sendRequest(`app/read`,t))',
-        '"login-mcp-server":J9((e,t)=>e.sendRequest(`mcpServer/oauth/login`,t))',
-        '"list-mcp-server-status":q9((e,{priority:t,'
-        "source:n,timeoutMs:r,trace:i,...a})=>e.listMcpServers(a,",
-        "listMcpServers(e,t){let n=JSON.stringify({options:t,params:e})",
-        "let i=this.sendRequest(`mcpServerStatus/list`,e,t);",
+        "listMcpServers(e,t){return Gen(this,this.mcpServerStatusPromises,e,t,",
+        "l=e.sendRequest(`mcpServerStatus/list`,n,a)",
     ),
     reset_query=(
-        "function Ooi(){let e=(0,SI.c)(1),t;return "
-        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
-        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:koi,"
-        "refetchInterval:Wp.ONE_MINUTE,staleTime:Wp.FIVE_SECONDS},e[0]=t):"
-        "t=e[0],It(t)}",
-        "function Ooi(){let e=window.__codexMuxResetAccountId;return It({"
-        "queryKey:[`rate-limit-reset-credits`,e??`primary`],"
-        "queryFn:e?()=>codexMuxRateLimitResets(e):koi,"
-        "refetchInterval:Wp.ONE_MINUTE,staleTime:Wp.FIVE_SECONDS})}",
+        "function ovr(){let e=(0,RR.c)(1);kh(),W(null);let t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:cvr,select:svr,refetchInterval:Yd.ONE_MINUTE,staleTime:Yd.FIVE_SECONDS},e[0]=t):t=e[0],jf(t)}",
+        "function ovr(){kh(),W(null);let e=window.__codexMuxResetAccountId;return jf({queryKey:[`rate-limit-reset-credits`,e??`primary`],queryFn:e?()=>codexMuxRateLimitResets(e):cvr,select:svr,refetchInterval:Yd.ONE_MINUTE,staleTime:Yd.FIVE_SECONDS})}",
     ),
     reset_mutation=(
-        "function Aoi(){let e=(0,SI.c)(3),t=ct(),n=Uw(),r;return "
-        "e[0]!==n||e[1]!==t?(r={mutationFn:joi,onSuccess:(e,r)=>{"
-        "let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){"
-        "let n=e.code===`reset`?e.credit?.id??i:i;"
-        "t.setQueryData([`rate-limit-reset-credits`],e=>eoi(e,a,n))}"
-        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
-        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}",
-        "function Aoi(){let e=ct(),t=Uw(),n=window.__codexMuxResetAccountId,"
-        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
-        "mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):joi,"
-        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;"
-        "if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?"
-        "n.credit?.id??a:a;e.setQueryData(r,e=>eoi(e,o,t))}"
-        "Promise.all([t([`rate-limit-status`]),t(r)])}})}",
+        "function lvr(){let e=(0,RR.c)(3),t=Qa(),n=Pm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:uvr,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-reset-credits`],e=>N_r(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],Hh(r)}",
+        "function lvr(){let e=Qa(),t=Pm(),n=window.__codexMuxResetAccountId,r=[`rate-limit-reset-credits`,n??`primary`];return Hh({mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):uvr,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>N_r(e,o,t))}Promise.all([t([`rate-limit-status`]),t(r)])}})}",
     ),
-    usage_modal="E$s",
+    usage_modal="function Et(e){let t=(0,Dt.c)(19),{defaultResetCreditsOpen:r,",
+    usage_windows="let x=b;if(v!=null){",
     usage_header=(
-        "let _e;t[46]===he?_e=t[47]:"
-        "(_e=(0,I0.jsxs)(WL,{children:[he,ge]}),t[46]=he,t[47]=_e);",
-        "let _e=(0,I0.jsxs)(WL,{children:[he,ge,"
-        "window.__codexMuxResetAccountSelector??null]});",
+        "(je=(0,$.jsx)(se,{children:(0,$.jsx)(O,{title:(0,$.jsx)(R,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(w,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})})}),t[41]=je)",
+        "(je=(0,$.jsxs)(se,{children:[(0,$.jsx)(O,{title:(0,$.jsx)(R,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(w,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})}),window.__codexMuxResetAccountSelector??null]}),t[41]=je)",
     ),
     profile_avatar=(
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":z.isPending,"
-        "className:Le(`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "globalThis.CodexMuxProfileAvatarStack?.("
-        "{onSelect:()=>M.refetch()})??null,"
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":z.isPending,"
-        "className:Le(globalThis.CodexMuxProfileAvatarStack?`hidden`:"
-        "`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
+        "avatar:(0,$.jsxs)($.Fragment,{children:[(0,$.jsxs)(`div`,{\"aria-disabled\":_n,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:rn(`group relative flex rounded-full outline-none`,",
+        "avatar:(0,$.jsxs)($.Fragment,{children:[globalThis.CodexMuxProfileAvatarStack?.({onSelect:()=>yt.refetch()})??null,(0,$.jsxs)(`div`,{\"aria-disabled\":_n,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:rn(globalThis.CodexMuxProfileAvatarStack?`hidden`:`group relative flex rounded-full outline-none`,",
     ),
     profile_name=(
-        "displayName:Ze??(0,$.jsx)(o,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
-        "displayName:globalThis.__codexMuxSelectedProfileAccountId?"
-        "(Ze??(0,$.jsx)(o,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,"
-        "description:`Fallback profile display name`})):null",
+        "sr=Hn??(0,$.jsx)(J,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
+        "sr=globalThis.__codexMuxSelectedProfileAccountId?(Hn??(0,$.jsx)(J,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})):null",
     ),
     profile_identity=(
-        "username:Ke==null?null:(0,$.jsx)(o,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ke}})",
-        "username:globalThis.__codexMuxSelectedProfileAccountId&&Ke!=null?"
-        "(0,$.jsx)(o,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ke}}):null",
+        "zn=In?Rn:null,Bn=i?ae?.display_name?.trim()||null:bt?.displayName??null,",
+        "zn=globalThis.__codexMuxSelectedProfileAccountId&&In?Rn:null,Bn=i?ae?.display_name?.trim()||null:bt?.displayName??null,",
     ),
-    plugin_bundle_glob="plugins-page-*.js",
     plugin_scope=(
-        "ee=(0,tc.jsxs)(tc.Fragment,{children:[H,U]})",
-        "ee=(0,tc.jsxs)(tc.Fragment,{children:["
-        "globalThis.CodexMuxPluginScope?.()??null,H,U]})",
+        "(C=(0,ao.jsx)(Sn,{title:h,subtitle:g,action:S,children:m})",
+        "(C=(0,ao.jsx)(Sn,{title:h,subtitle:g,action:S,children:[globalThis.CodexMuxPluginScope?.()??null,m]})",
     ),
     thread_identifiers={
-        "$n": "jf",
-        "sr": "Pa",
-        "TE": "jy",
-        "zE": "CE",
-        "K": "q",
-    },
-    thread_anchor="function bE(){let e=(0,SE.c)(1)",
-    thread_sections=(
-        "children:[c,l,u,d,f,p,m,h,g,_,v,y,b,x]",
-        "children:[c,l,u,d,f,(0,CE.jsx)(CodexMuxThreadSubscription,{}),"
-        "p,m,h,g,_,v,y,b,x]",
-    ),
-)
-
-# Build 7746 splits the renderer: data access and RPC live in app-initial,
-# while the menu, usage, and alert surfaces render from app-primary.
-RENDERER_BUILD_7746 = RendererBuild(
-    marker=(
-        "function wb(e,t){let n=e.get(Tb);"
-        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
-        "return n.forHost(t)}"
-    ),
-    ui_bundle_glob="app-primary-*.js",
-    data_anchor=(
-        "function wb(e,t){let n=e.get(Tb);"
-        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
-        "return n.forHost(t)}"
-    ),
-    menu_identifiers={
-        "e7": "Pq",
-        "kXc": "lgn",
-        "Lo": "DO",
-        "Q": "_S",
-        "BW": "ru",
-        "QLs": "jG",
-        "_H": "fa",
-        "S2": "sK",
-        "CH": "Oo",
-        "jLa": "jB",
-        "lt": "Su",
-    },
-    menu_anchor="function $hn(e){let t=(0,tgn.c)(35),",
-    usage_slot=("usageItems:Tt", "usageItems:(0,Iq.jsx)(CodexMuxAccountMenu,{})"),
-    plugin_request=(
-        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
-        "`AppServerRequestClient is missing a message dispatcher`);"
-        "return e===`config/read`?",
-        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
-        "`AppServerRequestClient is missing a message dispatcher`);"
-        "t=codexMuxScopePluginRequest(e,t);return e===`config/read`?",
-    ),
-    plugin_request_checks=(
-        "listMcpServers(e,t){let n=JSON.stringify({options:t,params:e})",
-        "let i=this.sendRequest(`mcpServerStatus/list`,e,t);",
-    ),
-    reset_query=(
-        "function l2i(){let e=(0,RK.c)(1);HR(),lb(null);let t;return "
-        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
-        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:d2i,select:u2i,"
-        "refetchInterval:gD.ONE_MINUTE,staleTime:gD.FIVE_SECONDS},e[0]=t):"
-        "t=e[0],vb(t)}",
-        "function l2i(){HR(),lb(null);let e=window.__codexMuxResetAccountId;"
-        "return vb({queryKey:[`rate-limit-reset-credits`,e??`primary`],"
-        "queryFn:e?()=>codexMuxRateLimitResets(e):d2i,select:u2i,"
-        "refetchInterval:gD.ONE_MINUTE,staleTime:gD.FIVE_SECONDS})}",
-    ),
-    reset_mutation=(
-        "function f2i(){let e=(0,RK.c)(3),t=mb(),n=mD(),r;return "
-        "e[0]!==n||e[1]!==t?(r={mutationFn:p2i,onSuccess:(e,r)=>{"
-        "let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){"
-        "let n=e.code===`reset`?e.credit?.id??i:i;"
-        "t.setQueryData([`rate-limit-reset-credits`],e=>Y1i(e,a,n))}"
-        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
-        "e[0]=n,e[1]=t,e[2]=r):r=e[2],xb(r)}",
-        "function f2i(){let e=mb(),t=mD(),n=window.__codexMuxResetAccountId,"
-        "r=[`rate-limit-reset-credits`,n??`primary`];return xb({"
-        "mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):p2i,"
-        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;"
-        "if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?"
-        "n.credit?.id??a:a;e.setQueryData(r,e=>Y1i(e,o,t))}"
-        "Promise.all([t([`rate-limit-status`]),t(r)])}})}",
-    ),
-    usage_modal="jG",
-    usage_header=(
-        "let ge;t[46]===me?ge=t[47]:"
-        "(ge=(0,AG.jsxs)(Gv,{children:[me,he]}),t[46]=me,t[47]=ge);",
-        "let ge=(0,AG.jsxs)(Gv,{children:[me,he,"
-        "window.__codexMuxResetAccountSelector??null]});",
-    ),
-    profile_avatar=(
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":L.isPending,"
-        "className:re(`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "globalThis.CodexMuxProfileAvatarStack?.("
-        "{onSelect:()=>j.refetch()})??null,"
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":L.isPending,"
-        "className:re(globalThis.CodexMuxProfileAvatarStack?`hidden`:"
-        "`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
-    ),
-    profile_name=(
-        "displayName:Re??(0,$.jsx)(J,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
-        "displayName:globalThis.__codexMuxSelectedProfileAccountId?"
-        "(Re??(0,$.jsx)(J,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,"
-        "description:`Fallback profile display name`})):null",
-    ),
-    profile_identity=(
-        "username:Ie==null?null:(0,$.jsx)(J,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ie}})",
-        "username:globalThis.__codexMuxSelectedProfileAccountId&&Ie!=null?"
-        "(0,$.jsx)(J,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ie}}):null",
-    ),
-    plugin_bundle_glob="plugins-settings-*.js",
-    plugin_scope=(
-        "subtitle:k,action:F,children:w})",
-        "subtitle:k,action:F,children:[globalThis.CodexMuxPluginScope?.()??null,w]})",
-    ),
-    thread_identifiers={
-        "$n": "zd",
-        "sr": "Gi",
-        "TE": "nT",
-        "zE": "mT",
         "K": "Q",
     },
-    thread_anchor="function dT(){let e=(0,pT.c)(1),",
+    thread_anchor="function hE(e){let t=(0,gE.c)(4),{onOpenPullRequestSidePanel:n,onForceShow:r,registerEnvironmentActionCommands:i}=e,a=p(_o),",
     thread_sections=(
-        "children:[d,f,p,m,h,g,_,v,y,b,x,S,C,w,T,E,D]",
-        "children:[d,f,p,m,h,g,_,v,y,b,x,S,C,"
-        "(0,mT.jsx)(CodexMuxThreadSubscription,{}),w,T,E,D]",
+        "(k=(0,vE.jsxs)(vE.Fragment,{children:[b,x,S,C,w,T,E,D,O]})",
+        "(k=(0,vE.jsxs)(vE.Fragment,{children:[b,x,S,C,w,T,(0,vE.jsx)(CodexMuxThreadSubscription,{}),E,D,O]})",
+    ),
+    composer_actions=(
+        "(0,ZW.jsxs)(qS.FooterActions,{ref:ft,spacing:an,children:[on,nn,sn]})",
+        "(0,ZW.jsxs)(qS.FooterActions,{spacing:`none`,children:[nn,(0,ZW.jsx)(`div`,{className:`ms-2 flex items-center`,children:Nt})]})",
+    ),
+    fork_titles=(
+        "function W_r(e,t){t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+        "function W_r(e,t){codexMuxForkTitles(e,t);t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+    ),
+    fork_identifiers={
+        "CODEX_MUX_SERVICES": "i6",
+        "codexMuxConversationTurns": "HJn",
+        "codexMuxTurnWithId": "XQ",
+        "codexMuxRememberDescription": "yGr",
+    },
+    identifier_probes=(
+        "function bza(e,t){return xza(e,t).src}",
+        "function qHt(e,t,n,r){e.set(DL,e=>{let i=e.modals.find(e=>EL(e.ModalComponent,t)),",
+        "function hDi(e){let t=(0,_Di.c)(7),n;t[0]===e.onClose?n=t[1]:(n=(0,dG.jsx)(gDi,{onClose:e.onClose}),t[0]=e.onClose,t[1]=n);let r;t[2]===e?r=t[3]:(r=(0,dG.jsx)(yDi,{...e}),t[2]=e,t[3]=r);let i;return t[4]!==n||t[5]!==r?(i=(0,dG.jsx)(vDi.Suspense,{fallback:n,children:r}),t[4]=n,t[5]=r,t[6]=i):i=t[6],i}function gDi(e){let t=(0,_Di.c)(8),{onClose:n,failed:r}=e,i=r!==void 0&&r,a;t[0]===n?a=t[1]:(a=e=>{e||n()},t[0]=n,t[1]=a);let o;t[2]===i?o=t[3]:(o=i?(0,dG.jsx)(J,{id:`codex.rateLimitResetModal.loadError.title`,",
+        "c=Pe(Z),l=SSi(),u=xd(),d=wu(),f=JW(),p=tm(),",
+        "r=Pe(sh),[i,a]=(0,vZt.useState)(!1),o;if(t[0]!==r||t[1]!==n.tabId){",
+        "t=Qa(),n=Pm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:uvr,",
+        "i6=await r6.services,i6.threadReadState!=null",
+        "function HJn(e){return e==null?null:YQ(e)}function XQ(e,t){return HJn(e)?.find(e=>e.turnId===t)??null}",
+        "function yGr(e,t,n){let r={...tL(bGr,{}),[t]:n};",
+        "let yt=ki(vt),bt=i?lt:yt.data,",
+        "(r=(0,vE.jsx)(Q.Section,{sectionKey:`usage`,",
+        "Fjt=$(),Ijt=Dp(Tjt)})))()}var Rjt,zjt,Bjt,Vjt,",
+        "sut=Yh(),cut=(0,sut.createContext)(Irt)})))()}var uut,dut,fut,put,",
+        "R$t=jd(),yT(),pQt(),z$t=(0,ST.createContext)(null)",
+        "XAt=Kp(Z,()=>Gr().homeModePreferences??Ake({",
+        "let e=Kp(sh,[]),t=u(sh,e=>null);return{entries$:ld(sh,({",
+        "o1.jsx)(HJe,{onSelect:()=>u?.(e),",
+        "(s=(0,Y$.jsx)(lf.Item,{leftIconAsset:rIe,onClick:r,children:o})",
+    ),
+    usage_status=(
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t}))}",
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await codexMuxFilterUsageStatus(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t})))}",
     ),
 )
 
-# Build 8378 keeps the split renderer introduced in 7746, with re-minified
-# component, hook, and JSX identifiers throughout the affected surfaces.
-RENDERER_BUILD_8378 = RendererBuild(
-    marker=(
-        "function Sb(e,t){let n=e.get(Cb);"
-        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
-        "return n.forHost(t)}"
-    ),
-    ui_bundle_glob="app-primary-*.js",
-    data_anchor=(
-        "function Sb(e,t){let n=e.get(Cb);"
-        "if(n==null)throw Error(`AppServerManager RPC is not connected`);"
-        "return n.forHost(t)}"
-    ),
-    menu_identifiers={
-        "e7": "dq",
-        "kXc": "Pyn",
-        "Lo": "fo",
-        "Q": "HE",
-        "BW": "Zv",
-        "QLs": "tG",
-        "_H": "Qy",
-        "S2": "MG",
-        "CH": "of",
-        "jLa": "uB",
-        "lt": "vr",
-    },
-    menu_anchor="function wyn(e){let t=(0,Eyn.c)(35),",
-    usage_slot=("usageItems:wt", "usageItems:(0,dq.jsx)(CodexMuxAccountMenu,{})"),
-    plugin_request=RENDERER_BUILD_7746.plugin_request,
-    plugin_request_checks=RENDERER_BUILD_7746.plugin_request_checks,
-    reset_query=(
-        "function x5i(){let e=(0,lq.c)(1);dz(),sb(null);let t;return "
-        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
-        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:C5i,select:S5i,"
-        "refetchInterval:nD.ONE_MINUTE,staleTime:nD.FIVE_SECONDS},e[0]=t):"
-        "t=e[0],gb(t)}",
-        "function x5i(){dz(),sb(null);let e=window.__codexMuxResetAccountId;"
-        "return gb({queryKey:[`rate-limit-reset-credits`,e??`primary`],"
-        "queryFn:e?()=>codexMuxRateLimitResets(e):C5i,select:S5i,"
-        "refetchInterval:nD.ONE_MINUTE,staleTime:nD.FIVE_SECONDS})}",
-    ),
-    reset_mutation=(
-        "function w5i(){let e=(0,lq.c)(3),t=fb(),n=eD(),r;return "
-        "e[0]!==n||e[1]!==t?(r={mutationFn:T5i,onSuccess:(e,r)=>{"
-        "let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){"
-        "let n=e.code===`reset`?e.credit?.id??i:i;"
-        "t.setQueryData([`rate-limit-reset-credits`],e=>s8i(e,a,n))}"
-        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
-        "e[0]=n,e[1]=t,e[2]=r):r=e[2],yb(r)}",
-        "function w5i(){let e=fb(),t=eD(),n=window.__codexMuxResetAccountId,"
-        "r=[`rate-limit-reset-credits`,n??`primary`];return yb({"
-        "mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):T5i,"
-        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;"
-        "if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?"
-        "n.credit?.id??a:a;e.setQueryData(r,e=>s8i(e,o,t))}"
-        "Promise.all([t([`rate-limit-status`]),t(r)])}})}",
-    ),
-    usage_modal="tG",
-    usage_header=(
-        "let ge;t[46]===me?ge=t[47]:"
-        "(ge=(0,eG.jsxs)(Eb,{children:[me,he]}),t[46]=me,t[47]=ge);",
-        "let ge=(0,eG.jsxs)(Eb,{children:[me,he,"
-        "window.__codexMuxResetAccountSelector??null]});",
-    ),
-    profile_avatar=(
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":B.isPending,"
-        "className:ue(`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
-        "avatar:(0,$.jsxs)($.Fragment,{children:["
-        "globalThis.CodexMuxProfileAvatarStack?.("
-        "{onSelect:()=>M.refetch()})??null,"
-        "(0,$.jsxs)(`label`,{\"aria-disabled\":B.isPending,"
-        "className:ue(globalThis.CodexMuxProfileAvatarStack?`hidden`:"
-        "`group relative flex size-20 rounded-full outline-none "
-        "focus-within:ring-1 focus-within:ring-ring`,",
-    ),
-    profile_name=(
-        "displayName:Ue??(0,$.jsx)(J,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
-        "displayName:globalThis.__codexMuxSelectedProfileAccountId?"
-        "(Ue??(0,$.jsx)(J,{id:`profile.nameFallback`,"
-        "defaultMessage:`ChatGPT user`,"
-        "description:`Fallback profile display name`})):null",
-    ),
-    profile_identity=(
-        "username:Ve==null?null:(0,$.jsx)(J,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ve}})",
-        "username:globalThis.__codexMuxSelectedProfileAccountId&&Ve!=null?"
-        "(0,$.jsx)(J,{id:`profile.usernameValue`,"
-        "defaultMessage:`@{username}`,"
-        "description:`Profile username shown with an at-sign prefix`,"
-        "values:{username:Ve}}):null",
-    ),
-    plugin_bundle_glob="plugins-settings-*.js",
-    plugin_scope=RENDERER_BUILD_7746.plugin_scope,
-    thread_identifiers={
-        "$n": "ve",
-        "sr": "ds",
-        "TE": "XT",
-        "zE": "cE",
-        "K": "Z",
-    },
-    thread_anchor="function aE(){let e=(0,sE.c)(1),",
-    thread_sections=(
-        "children:[m,h,g,_,v,y,b,x]",
-        "children:[m,h,g,_,v,(0,cE.jsx)(CodexMuxThreadSubscription,{}),y,b,x]",
-    ),
-)
 
-# Build 8576 re-minifies the split renderer and shifts the thread section locals.
-RENDERER_BUILD_8576 = RendererBuild(
-    marker=(
-        "function xb(e,t){let n=e.get(Sb);if(n==null)throw Error(`AppServerManager RPC is not"
-        " connected`);return n.forHost(t)}"
-    ),
-    ui_bundle_glob="app-primary-*.js",
-    data_anchor=(
-        "function xb(e,t){let n=e.get(Sb);if(n==null)throw Error(`AppServerManager RPC is not"
-        " connected`);return n.forHost(t)}"
-    ),
+RENDERER_BUILD_12404 = RendererBuild(
+    marker="function ZHa(e,t){return QHa(e,t).src}",
+    data_anchor="function KP(e,t){let n=e.get(qP);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}",
     menu_identifiers={
-        "e7": "xK",
-        "kXc": "Obn",
-        "Lo": "Oe",
-        "Q": "zb",
-        "BW": "Hv",
-        "QLs": "tfn",
-        "_H": "Zy",
-        "S2": "iG",
-        "CH": "Rd",
-        "jLa": "Qz",
-        "lt": "Ai",
+        "e7": "$()",
+        "kXc": "Vh()",
+        "Lo": "Fe",
+        "Q": "Z",
+        "BW": "qHt",
+        "QLs": "QAi",
+        "_H": "B",
+        "CH": "bl",
+        "jLa": "ZHa",
+        "lt": "to",
+        "Rv": "th",
+        "RD": "Od()",
     },
-    menu_anchor="function vbn(e){let t=(0,bbn.c)(35),",
+    menu_anchor="function ZHa(e,t){return QHa(e,t).src}",
     usage_slot=(
-        "usageItems:wt",
-        "usageItems:(0,xK.jsx)(CodexMuxAccountMenu,{})",
+        "(O=(0,$.jsx)(Pi,{accountIcon:o,accountSwitcher:Ln,additionalItems:g,displayName:_,hasWorkspaceAccount:c,identityItems:v,isPetVisible:d,onCloseMenu:s,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:_n,onOpenWorkspaceSettings:E,personalPlanLabel:f,onTogglePet:D,petShortcut:et,settingsShortcut:$e,usageItems:qn})",
+        "(O=(0,$.jsx)(Pi,{accountIcon:o,accountSwitcher:Ln,additionalItems:g,displayName:_,hasWorkspaceAccount:c,identityItems:v,isPetVisible:d,onCloseMenu:s,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:_n,onOpenWorkspaceSettings:E,personalPlanLabel:f,onTogglePet:D,petShortcut:et,settingsShortcut:$e,usageItems:(0,$.jsx)(globalThis.CodexMuxAccountMenu,{})})",
     ),
-    plugin_request=RENDERER_BUILD_7746.plugin_request,
-    plugin_request_checks=RENDERER_BUILD_7746.plugin_request_checks,
+    plugin_request=(
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?",
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);t=codexMuxScopePluginRequest(e,t);return e===`config/read`?",
+    ),
+    plugin_request_checks=(
+        "listMcpServers(e,t){return Gen(this,this.mcpServerStatusPromises,e,t,",
+        "l=e.sendRequest(`mcpServerStatus/list`,n,a)",
+    ),
     reset_query=(
-        (
-            "function j5i(){let e=(0,lq.c)(1);dz(),ob(null);let t;return e[0]===Symbol.for(`react"
-            ".memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:N5i,select:"
-            "M5i,refetchInterval:tD.ONE_MINUTE,staleTime:tD.FIVE_SECONDS},e[0]=t):t=e[0],hb(t)}"
-        ),
-        (
-            "function j5i(){dz(),ob(null);let e=window.__codexMuxResetAccountId;return hb({queryK"
-            "ey:[`rate-limit-reset-credits`,e??`primary`],queryFn:e?()=>codexMuxRateLimitResets(e"
-            "):N5i,select:M5i,refetchInterval:tD.ONE_MINUTE,staleTime:tD.FIVE_SECONDS})}"
-        ),
+        "function ber(){let e=(0,xI.c)(1);Th(),W(null);let t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:Ser,select:xer,refetchInterval:Wd.ONE_MINUTE,staleTime:Wd.FIVE_SECONDS},e[0]=t):t=e[0],wf(t)}",
+        "function ber(){Th(),W(null);let e=window.__codexMuxResetAccountId;return wf({queryKey:[`rate-limit-reset-credits`,e??`primary`],queryFn:e?()=>codexMuxRateLimitResets(e):Ser,select:xer,refetchInterval:Wd.ONE_MINUTE,staleTime:Wd.FIVE_SECONDS})}",
     ),
     reset_mutation=(
-        (
-            "function P5i(){let e=(0,lq.c)(3),t=db(),n=$E(),r;return e[0]!==n||e[1]!==t?(r={mutat"
-            "ionFn:F5i,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_"
-            "redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-rese"
-            "t-credits`],e=>_8i(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-rese"
-            "t-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],vb(r)}"
-        ),
-        (
-            "function P5i(){let e=db(),t=$E(),n=window.__codexMuxResetAccountId,r=[`rate-limit-re"
-            "set-credits`,n??`primary`];return vb({mutationFn:n?i=>codexMuxConsumeRateLimitReset("
-            "n,i):F5i,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_r"
-            "edeemed`){let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>_8i(e,o,t))}Promis"
-            "e.all([t([`rate-limit-status`]),t(r)])}})}"
-        ),
+        "function Cer(){let e=(0,xI.c)(3),t=to(),n=jm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:wer,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-reset-credits`],e=>q9n(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],Ih(r)}",
+        "function Cer(){let e=to(),t=jm(),n=window.__codexMuxResetAccountId,r=[`rate-limit-reset-credits`,n??`primary`];return Ih({mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):wer,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>q9n(e,o,t))}Promise.all([t([`rate-limit-status`]),t(r)])}})}",
     ),
-    usage_modal="tfn",
+    usage_modal="function Et(e){let t=(0,Dt.c)(19),{defaultResetCreditsOpen:n,",
+    usage_windows="let x=b;if(v!=null){",
     usage_header=(
-        "let ge;t[46]===me?ge=t[47]:(ge=(0,VW.jsxs)(bb,{children:[me,he]}),t[46]=me,t[47]=ge);",
-        "let ge=(0,VW.jsxs)(bb,{children:[me,he,window.__codexMuxResetAccountSelector??null]});",
+        "(Me=(0,$.jsx)(S,{children:(0,$.jsx)(v,{title:(0,$.jsx)(p,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(k,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})})}),t[41]=Me)",
+        "(Me=(0,$.jsxs)(S,{children:[(0,$.jsx)(v,{title:(0,$.jsx)(p,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(k,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})}),window.__codexMuxResetAccountSelector??null]}),t[41]=Me)",
     ),
     profile_avatar=(
-        (
-            "avatar:(0,$.jsxs)($.Fragment,{children:[(0,$.jsxs)(`label`,{\"aria-disabled\":V.isPend"
-            "ing,className:he(`group relative flex size-20 rounded-full outline-none "
-            "focus-within:ring-1 focus-within:ring-ring`,"
-        ),
-        (
-            "avatar:(0,$.jsxs)($.Fragment,{children:[globalThis.CodexMuxProfileAvatarStack?.({onS"
-            "elect:()=>N.refetch()})??null,(0,$.jsxs)(`label`,{\"aria-disabled\":V.isPending,classN"
-            "ame:he(globalThis.CodexMuxProfileAvatarStack?`hidden`:`group relative flex size-20 "
-            "rounded-full outline-none focus-within:ring-1 focus-within:ring-ring`,"
-        ),
+        "avatar:(0,$.jsxs)($.Fragment,{children:[(0,$.jsxs)(`div`,{\"aria-disabled\":hn,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:on(`group relative flex rounded-full outline-none`,",
+        "avatar:(0,$.jsxs)($.Fragment,{children:[globalThis.CodexMuxProfileAvatarStack?.({onSelect:()=>bt.refetch()})??null,(0,$.jsxs)(`div`,{\"aria-disabled\":hn,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:on(globalThis.CodexMuxProfileAvatarStack?`hidden`:`group relative flex rounded-full outline-none`,",
     ),
     profile_name=(
-        (
-            "displayName:He??(0,$.jsx)(h,{id:`profile.nameFallback`,defaultMessage:`ChatGPT "
-            "user`,description:`Fallback profile display name`})"
-        ),
-        (
-            "displayName:globalThis.__codexMuxSelectedProfileAccountId?(He??(0,$.jsx)(h,{id:`prof"
-            "ile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile "
-            "display name`})):null"
-        ),
+        "lr=Vn??(0,$.jsx)(q,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
+        "lr=globalThis.__codexMuxSelectedProfileAccountId?(Vn??(0,$.jsx)(q,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})):null",
     ),
     profile_identity=(
-        (
-            "username:Ve==null?null:(0,$.jsx)(h,{id:`profile.usernameValue`,defaultMessage:`@{use"
-            "rname}`,description:`Profile username shown with an at-sign "
-            "prefix`,values:{username:Ve}})"
-        ),
-        (
-            "username:globalThis.__codexMuxSelectedProfileAccountId&&Ve!=null?(0,$.jsx)(h,{id:`pr"
-            "ofile.usernameValue`,defaultMessage:`@{username}`,description:`Profile username "
-            "shown with an at-sign prefix`,values:{username:Ve}}):null"
-        ),
+        "Rn=Fn?Ln:null,zn=r?ae?.display_name?.trim()||null:St?.displayName??null,",
+        "Rn=globalThis.__codexMuxSelectedProfileAccountId&&Fn?Ln:null,zn=r?ae?.display_name?.trim()||null:St?.displayName??null,",
     ),
-    plugin_bundle_glob="plugins-settings-*.js",
-    plugin_scope=RENDERER_BUILD_7746.plugin_scope,
+    plugin_scope=(
+        "(C=(0,ao.jsx)(Xn,{title:h,subtitle:g,action:S,children:m})",
+        "(C=(0,ao.jsx)(Xn,{title:h,subtitle:g,action:S,children:[globalThis.CodexMuxPluginScope?.()??null,m]})",
+    ),
     thread_identifiers={
-        "$n": "s",
-        "sr": "ps",
-        "TE": "XT",
-        "zE": "cE",
-        "K": "Z",
+        "K": "Q",
     },
-    thread_anchor="function aE(){let e=(0,sE.c)(1),",
+    thread_anchor="function _E(e){let t=(0,vE.c)(4),{onOpenPullRequestSidePanel:n,onForceShow:r,registerEnvironmentActionCommands:i}=e,a=h(wo),",
     thread_sections=(
-        "children:[h,g,_,v,y,b,x,S]",
-        "children:[h,g,_,v,y,(0,cE.jsx)(CodexMuxThreadSubscription,{}),b,x,S]",
+        "(k=(0,bE.jsxs)(bE.Fragment,{children:[b,x,S,C,w,T,E,D,O]})",
+        "(k=(0,bE.jsxs)(bE.Fragment,{children:[b,x,S,C,w,T,(0,bE.jsx)(CodexMuxThreadSubscription,{}),E,D,O]})",
+    ),
+    composer_actions=(
+        "(0,ZW.jsxs)(yb.FooterActions,{ref:ft,spacing:an,children:[on,nn,sn]})",
+        "(0,ZW.jsxs)(yb.FooterActions,{spacing:`none`,children:[nn,(0,ZW.jsx)(`div`,{className:`ms-2 flex items-center`,children:Nt})]})",
+    ),
+    fork_titles=(
+        "function W_r(e,t){t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+        "function W_r(e,t){codexMuxForkTitles(e,t);t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+    ),
+    fork_identifiers={
+        "CODEX_MUX_SERVICES": "i6",
+        "codexMuxConversationTurns": "HJn",
+        "codexMuxTurnWithId": "XQ",
+        "codexMuxRememberDescription": "yGr",
+    },
+    identifier_probes=(
+        "function ZHa(e,t){return QHa(e,t).src}",
+        "function qHt(e,t,n,r){e.set(DL,e=>{let i=e.modals.find(e=>EL(e.ModalComponent,t)),",
+        "function QAi(e){let t=(0,eji.c)(7),n;t[0]===e.onClose?n=t[1]:(n=(0,IW.jsx)($Ai,{onClose:e.onClose}),t[0]=e.onClose,t[1]=n);let r;t[2]===e?r=t[3]:(r=(0,IW.jsx)(nji,{...e}),t[2]=e,t[3]=r);let i;return t[4]!==n||t[5]!==r?(i=(0,IW.jsx)(tji.Suspense,{fallback:n,children:r}),t[4]=n,t[5]=r,t[6]=i):i=t[6],i}function $Ai(e){let t=(0,eji.c)(8),{onClose:n,failed:r}=e,i=r!==void 0&&r,a;t[0]===n?a=t[1]:(a=e=>{e||n()},t[0]=n,t[1]=a);let o;t[2]===i?o=t[3]:(o=i?(0,IW.jsx)(J,{id:`codex.rateLimitResetModal.loadError.title`,",
+        "c=Fe(Z),l=aEi(),u=vd(),d=Eu(),f=yW(),p=Yp(),",
+        "r=Fe(th),[i,a]=(0,yzr.useState)(!1),o;if(t[0]!==r||t[1]!==n.tabId){",
+        "t=to(),n=jm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:wer,",
+        "i6=await r6.services,i6.threadReadState!=null",
+        "function HJn(e){return e==null?null:YQ(e)}function XQ(e,t){return HJn(e)?.find(e=>e.turnId===t)??null}",
+        "function yGr(e,t,n){let r={...tL(bGr,{}),[t]:n};",
+        "let bt=qr(yt),St=r?dt:bt.data,",
+        "(r=(0,bE.jsx)(Q.Section,{sectionKey:`usage`,",
+        "CCr=$(),wCr=vp(pCr)})))()}var ECr,DCr,OCr,kCr,",
+        "Out=Vh(),kut=(0,Out.createContext)(sit)})))()}var jut,Mut,Nut,Put,Fut,Iut,Lut,Rut,zut,But,Vut,Hut,Uut,Gy,Wut,Gut,Kut,qut,Jut,Yut,Xut,Zut,Ky,Qut,$ut,edt,tdt,ndt;",
+        "u1n=Od(),rF(),zQn(),d1n=(0,oF.createContext)(null)",
+        "ujt=Bp(Z,()=>Gr().homeModePreferences??Oke({",
+        "let e=Bp(th,[]),t=u(th,e=>null);return{entries$:sd(th,({",
+        "QQ.jsx)(B,{onSelect:()=>u?.(e),",
+        "(s=(0,VQ.jsx)(bl.Item,{leftIconAsset:hLe,onClick:r,children:o})",
+    ),
+    usage_status=(
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t}))}",
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await codexMuxFilterUsageStatus(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t})))}",
     ),
 )
 
-RENDERER_BUILDS = (
-    RENDERER_BUILD_6396,
-    RENDERER_BUILD_6662,
-    RENDERER_BUILD_7746,
-    RENDERER_BUILD_8378,
-    RENDERER_BUILD_8576,
+
+RENDERER_BUILD_12553 = RendererBuild(
+    marker="function SHa(e,t){return CHa(e,t).src}",
+    data_anchor="function KP(e,t){let n=e.get(qP);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}",
+    menu_identifiers={
+        "e7": "$()",
+        "kXc": "Jh()",
+        "Lo": "Fe",
+        "Q": "Z",
+        "BW": "qHt",
+        "QLs": "qAi",
+        "_H": "B",
+        "CH": "kl",
+        "jLa": "SHa",
+        "lt": "ro",
+        "Rv": "ch",
+        "RD": "Vd()",
+    },
+    menu_anchor="function SHa(e,t){return CHa(e,t).src}",
+    usage_slot=(
+        "(O=(0,$.jsx)(Pi,{accountIcon:o,accountSwitcher:Fn,additionalItems:g,displayName:_,hasWorkspaceAccount:c,identityItems:v,isPetVisible:d,onCloseMenu:s,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:_n,onOpenWorkspaceSettings:E,personalPlanLabel:f,onTogglePet:D,petShortcut:et,settingsShortcut:$e,usageItems:Kn})",
+        "(O=(0,$.jsx)(Pi,{accountIcon:o,accountSwitcher:Fn,additionalItems:g,displayName:_,hasWorkspaceAccount:c,identityItems:v,isPetVisible:d,onCloseMenu:s,onCopyUserId:x,onLogOut:S,onOpenChatGptAnalytics:C,onOpenPersonalization:w,onOpenProfile:T,onOpenSettings:_n,onOpenWorkspaceSettings:E,personalPlanLabel:f,onTogglePet:D,petShortcut:et,settingsShortcut:$e,usageItems:(0,$.jsx)(globalThis.CodexMuxAccountMenu,{})})",
+    ),
+    plugin_request=(
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?",
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);t=codexMuxScopePluginRequest(e,t);return e===`config/read`?",
+    ),
+    plugin_request_checks=(
+        "listMcpServers(e,t){return Gen(this,this.mcpServerStatusPromises,e,t,",
+        "l=e.sendRequest(`mcpServerStatus/list`,n,a)",
+    ),
+    reset_query=(
+        "function _er(){let e=(0,TI.c)(1);Mh(),W(null);let t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:yer,select:ver,refetchInterval:rf.ONE_MINUTE,staleTime:rf.FIVE_SECONDS},e[0]=t):t=e[0],Nf(t)}",
+        "function _er(){Mh(),W(null);let e=window.__codexMuxResetAccountId;return Nf({queryKey:[`rate-limit-reset-credits`,e??`primary`],queryFn:e?()=>codexMuxRateLimitResets(e):yer,select:ver,refetchInterval:rf.ONE_MINUTE,staleTime:rf.FIVE_SECONDS})}",
+    ),
+    reset_mutation=(
+        "function ber(){let e=(0,TI.c)(3),t=ro(),n=zm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:xer,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-reset-credits`],e=>W9n(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],Uh(r)}",
+        "function ber(){let e=ro(),t=zm(),n=window.__codexMuxResetAccountId,r=[`rate-limit-reset-credits`,n??`primary`];return Uh({mutationFn:n?i=>codexMuxConsumeRateLimitReset(n,i):xer,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>W9n(e,o,t))}Promise.all([t([`rate-limit-status`]),t(r)])}})}",
+    ),
+    usage_modal="function Et(e){let t=(0,Dt.c)(19),{defaultResetCreditsOpen:n,",
+    usage_windows="let x=b;if(v!=null){",
+    usage_header=(
+        "(Me=(0,$.jsx)(S,{children:(0,$.jsx)(v,{title:(0,$.jsx)(p,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(k,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})})}),t[41]=Me)",
+        "(Me=(0,$.jsxs)(S,{children:[(0,$.jsx)(v,{title:(0,$.jsx)(p,{asChild:!0,children:(0,$.jsx)(`h2`,{className:`m-0`,children:(0,$.jsx)(k,{id:`codex.rateLimitResetPromptModal.usageTrackingHeading`,defaultMessage:`Usage`,description:`Heading for the Codex usage limit modal`})})})}),window.__codexMuxResetAccountSelector??null]}),t[41]=Me)",
+    ),
+    profile_avatar=(
+        "avatar:(0,$.jsxs)($.Fragment,{children:[(0,$.jsxs)(`div`,{\"aria-disabled\":hn,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:on(`group relative flex rounded-full outline-none`,",
+        "avatar:(0,$.jsxs)($.Fragment,{children:[globalThis.CodexMuxProfileAvatarStack?.({onSelect:()=>bt.refetch()})??null,(0,$.jsxs)(`div`,{\"aria-disabled\":hn,onPointerEnter:e=>Vt(e.pointerType!==`touch`),onPointerLeave:()=>Vt(!1),onPointerCancel:()=>Vt(!1),className:on(globalThis.CodexMuxProfileAvatarStack?`hidden`:`group relative flex rounded-full outline-none`,",
+    ),
+    profile_name=(
+        "lr=Vn??(0,$.jsx)(q,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})",
+        "lr=globalThis.__codexMuxSelectedProfileAccountId?(Vn??(0,$.jsx)(q,{id:`profile.nameFallback`,defaultMessage:`ChatGPT user`,description:`Fallback profile display name`})):null",
+    ),
+    profile_identity=(
+        "Rn=Fn?Ln:null,zn=r?ae?.display_name?.trim()||null:St?.displayName??null,",
+        "Rn=globalThis.__codexMuxSelectedProfileAccountId&&Fn?Ln:null,zn=r?ae?.display_name?.trim()||null:St?.displayName??null,",
+    ),
+    plugin_scope=(
+        "(C=(0,ao.jsx)(Yn,{title:h,subtitle:g,action:S,children:m})",
+        "(C=(0,ao.jsx)(Yn,{title:h,subtitle:g,action:S,children:[globalThis.CodexMuxPluginScope?.()??null,m]})",
+    ),
+    thread_identifiers={
+        "K": "Q",
+    },
+    thread_anchor="function _E(e){let t=(0,vE.c)(4),{onOpenPullRequestSidePanel:n,onForceShow:r,registerEnvironmentActionCommands:i}=e,a=h(wo),",
+    thread_sections=(
+        "(k=(0,bE.jsxs)(bE.Fragment,{children:[b,x,S,C,w,T,E,D,O]})",
+        "(k=(0,bE.jsxs)(bE.Fragment,{children:[b,x,S,C,w,T,(0,bE.jsx)(CodexMuxThreadSubscription,{}),E,D,O]})",
+    ),
+    composer_actions=(
+        "(0,ZW.jsxs)(Jb.FooterActions,{ref:ft,spacing:an,children:[on,nn,sn]})",
+        "(0,ZW.jsxs)(Jb.FooterActions,{spacing:`none`,children:[nn,(0,ZW.jsx)(`div`,{className:`ms-2 flex items-center`,children:Nt})]})",
+    ),
+    fork_titles=(
+        "function W_r(e,t){t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+        "function W_r(e,t){codexMuxForkTitles(e,t);t.addTurnCompletedListener(n=>{if(n.status===`inProgress`||n.turnId==null)return;",
+    ),
+    fork_identifiers={
+        "CODEX_MUX_SERVICES": "i6",
+        "codexMuxConversationTurns": "HJn",
+        "codexMuxTurnWithId": "XQ",
+        "codexMuxRememberDescription": "yGr",
+    },
+    identifier_probes=(
+        "function SHa(e,t){return CHa(e,t).src}",
+        "function qHt(e,t,n,r){e.set(DL,e=>{let i=e.modals.find(e=>EL(e.ModalComponent,t)),",
+        "function qAi(e){let t=(0,YAi.c)(7),n;t[0]===e.onClose?n=t[1]:(n=(0,HW.jsx)(JAi,{onClose:e.onClose}),t[0]=e.onClose,t[1]=n);let r;t[2]===e?r=t[3]:(r=(0,HW.jsx)(ZAi,{...e}),t[2]=e,t[3]=r);let i;return t[4]!==n||t[5]!==r?(i=(0,HW.jsx)(XAi.Suspense,{fallback:n,children:r}),t[4]=n,t[5]=r,t[6]=i):i=t[6],i}function JAi(e){let t=(0,YAi.c)(8),{onClose:n,failed:r}=e,i=r!==void 0&&r,a;t[0]===n?a=t[1]:(a=e=>{e||n()},t[0]=n,t[1]=a);let o;t[2]===i?o=t[3]:(o=i?(0,HW.jsx)(J,{id:`codex.rateLimitResetModal.loadError.title`,",
+        "c=Fe(Z),l=eEi(),u=Ad(),d=Lu(),f=TW(),p=rm(),",
+        "r=Fe(ch),[i,a]=(0,dzr.useState)(!1),o;if(t[0]!==r||t[1]!==n.tabId){",
+        "t=ro(),n=zm(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:xer,",
+        "i6=await r6.services,i6.threadReadState!=null",
+        "function HJn(e){return e==null?null:YQ(e)}function XQ(e,t){return HJn(e)?.find(e=>e.turnId===t)??null}",
+        "function yGr(e,t,n){let r={...tL(bGr,{}),[t]:n};",
+        "let bt=Xr(yt),St=r?dt:bt.data,",
+        "(r=(0,bE.jsx)(Q.Section,{sectionKey:`usage`,",
+        "uCr=$(),dCr=Ep(eCr)})))()}var pCr,mCr,hCr,gCr,",
+        "gut=Jh(),_ut=(0,gut.createContext)(tit)})))()}var yut,but,xut,Sut,Cut,wut,Tut,Eut,Dut,Out,kut,Aut,jut,rb,Mut,Nut,Put,Fut,Iut,Lut,Rut,zut,ib,But,Vut,Hut,Uut,Wut;",
+        "i1n=Vd(),uF(),NQn(),a1n=(0,pF.createContext)(null)",
+        "qAt=qp(Z,()=>Gr().homeModePreferences??gke({",
+        "let e=qp(ch,[]),t=u(ch,e=>null);return{entries$:yd(ch,({",
+        "O$.jsx)(B,{onSelect:()=>u?.(e),",
+        "(s=(0,_$.jsx)(kl.Item,{leftIconAsset:oLe,onClick:r,children:o})",
+    ),
+    usage_status=(
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t}))}",
+        "async function rJr({additionalHeaders:e,signal:t}){try{return zqr(await codexMuxFilterUsageStatus(await OU.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":dmn.toLowerCase(),\"x-openai-codex-pricing-chooser\":`1`,...e},signal:t})))}",
+    ),
 )
 
-USAGE_QUERY_PATTERN = re.compile(
-    r"queryKey:\[`rate-limit-status`\],(?P<select>select:e=>e,)?"
-    r"queryFn:async\(\)=>\{try\{(?P<lead>return |let e=)await "
-    r"(?P<call>[A-Za-z_$][\w$]*\.safeGet\(`/wham/usage`"
-    r"(?:,\{additionalHeaders:\{\"OAI-App-Brand\":[A-Za-z_$][\w$]*"
-    r"\.toLowerCase\(\)\}\})?\))"
-)
+
+RENDERER_BUILDS = (RENDERER_BUILD_12246, RENDERER_BUILD_12404, RENDERER_BUILD_12553)
+
 PROFILE_QUERY_PATTERN = re.compile(
     r"let e=await [A-Za-z_$][\w$]*\.safeGet\(`/wham/profiles/me`\)"
-)
-DEPLETED_ALERT_ANCHORS = (
-    "defaultMessage:`You’re out of Codex and Work usage`",
-    "defaultMessage:`You’ve used all Codex and Work usage`",
-    "defaultMessage:`You’ve reached your usage limit`",
 )
 
 
@@ -1522,6 +1229,7 @@ class RendererBundle:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.text = path.read_text(encoding="utf-8")
+        self.original = self.text
 
     def replace(self, anchor: str, replacement: str, description: str) -> None:
         if self.text.count(anchor) != 1:
@@ -1539,18 +1247,44 @@ class RendererBundle:
         self.replace(anchor, source + "\n" + anchor, description)
 
     def save(self) -> None:
-        self.path.write_text(self.text, encoding="utf-8")
+        if self.text != self.original:
+            self.path.write_text(self.text, encoding="utf-8")
 
 
-def single_bundle(assets: Path, glob: str, anchor: str, description: str) -> Path:
-    matches = [
-        path
-        for path in assets.glob(glob)
-        if anchor in path.read_text(encoding="utf-8")
-    ]
-    if len(matches) != 1:
-        raise RuntimeError(f"expected one {description}, found {len(matches)}")
-    return matches[0]
+class RendererBundleSet:
+    """Every renderer bundle. Builds keep moving code between eager bundles
+    and lazy chunks, so each patch lands in the one bundle that holds its
+    anchor exactly once."""
+
+    def __init__(self, paths: list[Path]) -> None:
+        self.bundles = [RendererBundle(path) for path in paths]
+
+    def _holder(self, anchor: str, description: str) -> RendererBundle:
+        holders = [bundle for bundle in self.bundles if anchor in bundle.text]
+        if len(holders) != 1 or holders[0].text.count(anchor) != 1:
+            raise RuntimeError(f"could not find {description}")
+        return holders[0]
+
+    def contains(self, anchor: str) -> bool:
+        return sum(bundle.text.count(anchor) for bundle in self.bundles) == 1
+
+    def replace(self, anchor: str, replacement: str, description: str) -> None:
+        self._holder(anchor, description).replace(anchor, replacement, description)
+
+    def inject(self, anchor: str, source: str, description: str) -> None:
+        self._holder(anchor, description).inject(anchor, source, description)
+
+    def substitute(
+        self, pattern: re.Pattern[str], replacement: str, description: str
+    ) -> None:
+        holders = [bundle for bundle in self.bundles if pattern.search(bundle.text)]
+        if len(holders) != 1:
+            raise RuntimeError(f"could not find {description}")
+        holders[0].substitute(pattern, replacement, description)
+
+    def save(self) -> None:
+        for bundle in self.bundles:
+            bundle.save()
 
 
 def injected_source(name: str, token: str, identifiers: dict[str, str]) -> str:
@@ -1576,128 +1310,117 @@ def patch_renderer(extracted: Path, token: str) -> None:
     index_path.write_text(index, encoding="utf-8")
 
     assets = webview / "assets"
-    initial_bundles = list(assets.glob("app-initial-*.js"))
-    if len(initial_bundles) != 1:
-        raise RuntimeError(
-            f"expected one ChatGPT initial renderer bundle, found {len(initial_bundles)}"
-        )
-    data = RendererBundle(initial_bundles[0])
-    if "function codexMuxRequest(" in data.text:
+    renderer = RendererBundleSet(sorted(assets.glob("*.js")))
+    if any("function codexMuxRequest(" in bundle.text for bundle in renderer.bundles):
         raise RuntimeError("source app already contains the Codex multiplexer")
     build = next(
-        (candidate for candidate in RENDERER_BUILDS if candidate.marker in data.text),
+        (candidate for candidate in RENDERER_BUILDS if renderer.contains(candidate.marker)),
         None,
     )
     if build is None:
         raise RuntimeError("the ChatGPT renderer layout is not supported")
-    ui = (
-        data
-        if build.ui_bundle_glob == "app-initial-*.js"
-        else RendererBundle(
-            single_bundle(
-                assets, build.ui_bundle_glob, build.menu_anchor, "ChatGPT UI bundle"
-            )
-        )
-    )
+    for probe in build.identifier_probes:
+        if not renderer.contains(probe):
+            raise RuntimeError(f"could not verify an identifier probe: {probe[:60]!r}")
 
-    data.inject(
+    renderer.inject(
         build.data_anchor,
         injected_source("account-data.js", token, {}),
         "the native app-server RPC accessor",
     )
     for check in build.plugin_request_checks:
-        if data.text.count(check) != 1:
+        if not renderer.contains(check):
             raise RuntimeError(
                 "could not verify the native Plugins request-to-RPC mapping"
             )
-    data.replace(*build.plugin_request, "the native app-server request bridge")
-    data.substitute(
-        USAGE_QUERY_PATTERN,
-        r"queryKey:[`rate-limit-status`],\g<select>queryFn:async()=>{try{"
-        r"\g<lead>await codexMuxFilterUsageStatus(await \g<call>)",
-        "the native rate-limit status query",
-    )
-    data.substitute(
+    renderer.replace(*build.plugin_request, "the native app-server request bridge")
+    renderer.replace(*build.usage_status, "the native rate-limit status fetch")
+    renderer.substitute(
         PROFILE_QUERY_PATTERN,
         "let e=await codexMuxProfileData("
         "globalThis.__codexMuxSelectedProfileAccountId??null)",
         "the native profile stats request",
     )
-    data.replace(*build.reset_query, "the native reset-credit query")
-    data.replace(*build.reset_mutation, "the native reset-credit mutation")
+    renderer.replace(*build.reset_query, "the native reset-credit query")
+    renderer.inject(
+        build.fork_titles[0],
+        injected_source("fork-titles.js", token, build.fork_identifiers),
+        "the native turn-completion setup",
+    )
+    renderer.replace(*build.fork_titles, "the native turn-completion setup")
+    renderer.replace(*build.reset_mutation, "the native reset-credit mutation")
 
-    ui.inject(
+    renderer.inject(
         build.menu_anchor,
         injected_source("account-menu.js", token, build.menu_identifiers),
         "the native ChatGPT profile menu component",
     )
-    ui.replace(*build.usage_slot, "the native ChatGPT usage menu slot")
-    ui.replace(
-        f"function {build.usage_modal}(e){{",
-        f"function {build.usage_modal}(e){{CodexMuxUseResetAccountState();",
+    renderer.replace(*build.usage_slot, "the native ChatGPT usage menu slot")
+    renderer.replace(
+        build.usage_modal,
+        build.usage_modal.replace(
+            "(e){", "(e){globalThis.CodexMuxUseResetAccountState();", 1
+        ),
         "the native Usage modal component",
     )
-    ui.replace(
-        "let y=v;if(g!=null){",
-        "let y=window.__codexMuxSelectedUsageWindows??v;if(g!=null){",
+    renderer.replace(
+        build.usage_windows,
+        build.usage_windows.replace("=", "=window.__codexMuxSelectedUsageWindows??", 1),
         "the native usage-window selection",
     )
-    ui.replace(*build.usage_header, "the native Usage sheet header")
-    for depleted_anchor in DEPLETED_ALERT_ANCHORS:
-        ui.replace(
-            depleted_anchor,
-            "defaultMessage:`All connected subscriptions are depleted`",
-            "a native subscription depletion alert",
+    renderer.replace(*build.usage_header, "the native Usage sheet header")
+    for anchor in build.composer_actions:
+        renderer.replace(
+            anchor,
+            anchor.replace("children:[", "children:[globalThis.codexMuxComposerAccount?.()??null,", 1),
+            "the native composer footer actions",
         )
-    data.save()
-    if ui is not data:
-        ui.save()
-
-    profile = RendererBundle(
-        single_bundle(
-            assets,
-            "profile-*.js",
-            build.profile_avatar[0],
-            "native Profile settings bundle",
-        )
-    )
-    profile.replace(*build.profile_avatar, "the native Profile avatar")
-    profile.replace(*build.profile_name, "the native Profile display name")
-    profile.replace(
+    renderer.replace(*build.profile_avatar, "the native Profile avatar")
+    renderer.replace(*build.profile_name, "the native Profile display name")
+    renderer.replace(
         *build.profile_identity, "the native Profile username and plan badge"
     )
-    profile.save()
-
-    plugins = RendererBundle(
-        single_bundle(
-            assets,
-            build.plugin_bundle_glob,
-            build.plugin_scope[0],
-            "native Plugins settings bundle",
-        )
-    )
-    plugins.replace(*build.plugin_scope, "the native Plugins settings content")
-    plugins.save()
-
-    thread = RendererBundle(
-        single_bundle(
-            assets,
-            "local-conversation-thread-*.js",
-            build.thread_anchor,
-            "local conversation renderer bundle",
-        )
-    )
-    thread.inject(
+    renderer.replace(*build.plugin_scope, "the native Plugins settings content")
+    renderer.inject(
         build.thread_anchor,
         injected_source("thread-subscription.js", token, build.thread_identifiers),
         "the native thread summary sources component",
     )
-    thread.replace(*build.thread_sections, "the native thread summary section list")
-    thread.save()
+    renderer.replace(*build.thread_sections, "the native thread summary section list")
+    renderer.save()
+
+
+def attach_router_updater(bootstrap: str) -> str:
+    """Hand the updater the bootstrap initializes between importing the main
+    process and running it to ui/router-updater.cjs, which serves the app's
+    own update UI from the router's updater instead of Sparkle."""
+    start = bootstrap.find("phase:`bootstrap-import-main`")
+    end = bootstrap.find("runMainAppStartup:", start)
+    if start < 0 or end < 0:
+        raise RuntimeError("could not find the updater in the copied ChatGPT app")
+    window = bootstrap[start:end]
+    calls = list(re.finditer(r"await ([A-Za-z_$][\w$]*)\.initialize\(\)(?=[;,])", window))
+    if len(calls) != 1:
+        raise RuntimeError("could not find the updater in the copied ChatGPT app")
+    call = calls[0]
+    attach = (
+        "await require(require(`node:path`).join(__dirname,`router-updater.cjs`))"
+        f".attach({call.group(1)})"
+    )
+    return bootstrap[: start + call.start()] + attach + bootstrap[start + call.end() :]
+
+
+UPDATER_MANAGER_API = (
+    "setUpdateReady(e){",
+    "setUpdateLifecycleState(e){",
+    "inAppUpdatesLaunchPolicyResolution=",
+    "hasUpdater(){return this.updater!=null}",
+)
 
 
 def disable_updater_lifecycle(extracted: Path) -> None:
-    """Keep every updater entry point (launch gate, menu, IPC) from starting Sparkle."""
+    """Keep every updater entry point (launch gate, menu, IPC) from starting
+    Sparkle, and check the manager still has what router-updater.cjs drives."""
     updater_anchor = (
         "initializeUpdater(){return this.options.enableUpdater?"
         "(this.updaterInitialization??=this.initializeUpdaterOnce(),"
@@ -1716,38 +1439,11 @@ def disable_updater_lifecycle(extracted: Path) -> None:
     bundle = bundle_path.read_text(encoding="utf-8")
     if bundle.count(updater_anchor) != 1:
         raise RuntimeError("could not find the desktop updater lifecycle")
-    bundle = bundle.replace(
-        updater_anchor,
-        "initializeUpdater(){return this.lastUnavailableReason="
-        f"`disabled by {DESKTOP_PROFILE_NAME}`,Promise.resolve()}}",
-        1,
-    )
+    missing = [marker for marker in UPDATER_MANAGER_API if marker not in bundle]
+    if missing:
+        raise RuntimeError(f"the desktop updater manager changed shape: {missing}")
+    bundle = bundle.replace(updater_anchor, "initializeUpdater(){return Promise.resolve()}", 1)
     bundle_path.write_text(bundle, encoding="utf-8")
-
-
-def patch_native_pipe_signing_team(
-    app: Path, identity: str, team_identifier: str | None
-) -> None:
-    """Keep native socket authentication aligned with the re-signed callers."""
-    if team_identifier is None:
-        return
-    if not re.fullmatch(r"[A-Z0-9]{10}", team_identifier):
-        raise RuntimeError("invalid native pipe signing team")
-    addon = app / "Contents/Resources/native/browser-use-peer-authorization.node"
-    if not addon.is_file():
-        raise RuntimeError("native pipe peer authorization addon is missing")
-    identifier, _ = signed_code_metadata(addon)
-    entitlements = sanitized_runtime_entitlements(addon)
-    # The signature contains additional team strings. Remove it before matching
-    # the single compiled allowlist constant; re-sign after changing that value.
-    run(["codesign", "--remove-signature", str(addon)])
-    binary = addon.read_bytes()
-    original = OPENAI_DISTRIBUTION_TEAM_IDENTIFIER.encode() + b"\0"
-    if binary.count(original) != 1:
-        raise RuntimeError("expected one native pipe signing-team constant")
-    addon.write_bytes(binary.replace(original, team_identifier.encode() + b"\0"))
-    sign_runtime_executable(addon, identity, identifier, entitlements)
-    run(["codesign", "--verify", "--strict", str(addon)])
 
 
 def relax_native_pipe_peer_authorization(extracted: Path) -> None:
@@ -1822,14 +1518,8 @@ def patch_desktop_profile(
     if replacements != 1:
         raise RuntimeError("could not isolate the copied ChatGPT desktop profile")
 
-    # The copied app must never replace itself with an unpatched official update.
-    updater_pattern = re.compile(
-        r"await [A-Za-z_$][\w$]*\.initialize\(\);"
-        r"(?=(?:try\{)?let\{runMainAppStartup:)"
-    )
-    bootstrap, updater_replacements = updater_pattern.subn("", bootstrap, count=1)
-    if updater_replacements != 1:
-        raise RuntimeError("could not disable updates in the copied ChatGPT app")
+    # Updates come from the router's own releases, never an unpatched official build.
+    bootstrap = attach_router_updater(bootstrap)
     bootstrap_path.write_text(bootstrap, encoding="utf-8")
     disable_updater_lifecycle(extracted)
 
@@ -1876,8 +1566,8 @@ def patch_desktop_profile(
         strict_computer_use_instruction,
         1,
     )
-    ui_test_bridge = extracted / ".vite" / "build" / "ui-test-bridge.cjs"
-    shutil.copy2(PROJECT_ROOT / "ui" / "ui-test-bridge.cjs", ui_test_bridge)
+    for module in ("ui-test-bridge.cjs", "router-updater.cjs"):
+        shutil.copy2(PROJECT_ROOT / "ui" / module, extracted / ".vite" / "build" / module)
     main += (
         "\n;if(process.env.CODEX_MUX_UI_TESTS===`1`)"
         "require(require(`node:path`).join(__dirname,`ui-test-bridge.cjs`)).start();"
@@ -1893,6 +1583,54 @@ def asar_header_digest(asar_path: Path) -> str:
     if len(header) != header_length:
         raise RuntimeError("could not read the repacked ASAR header")
     return hashlib.sha256(header).hexdigest()
+
+
+def electron_framework(app: Path) -> Path:
+    frameworks = list((app / "Contents" / "Frameworks").glob("* Framework.framework"))
+    if len(frameworks) != 1:
+        raise RuntimeError(f"expected one Electron framework, found {len(frameworks)}")
+    return frameworks[0]
+
+
+def asar_integrity_seal(binary: bytes) -> int | None:
+    """Where the framework keeps its Info.plist integrity digest, or None when
+    the build predates the seal or ships it disabled."""
+    at = binary.find(ASAR_INTEGRITY_SENTINEL)
+    if at < 0:
+        return None
+    if binary.find(ASAR_INTEGRITY_SENTINEL, at + 1) >= 0:
+        raise RuntimeError("found more than one ASAR integrity seal")
+    enabled, version = binary[at + 32], binary[at + 33]
+    if not enabled:
+        return None
+    if version != 1:
+        raise RuntimeError(f"unsupported ASAR integrity seal version {version}")
+    return at + 34
+
+
+def seal_asar_integrity(app: Path, identity: str) -> None:
+    """Point the framework's seal at the repacked archive's Info.plist entry,
+    then re-sign the framework and the helpers that load it."""
+    framework = electron_framework(app)
+    binary_path = framework / "Versions" / "Current" / framework.stem
+    binary = bytearray(binary_path.read_bytes())
+    digest_at = asar_integrity_seal(binary)
+    if digest_at is None:
+        return
+    with (app / "Contents" / "Info.plist").open("rb") as handle:
+        integrity = plistlib.load(handle)["ElectronAsarIntegrity"]
+    binary[digest_at : digest_at + 32] = hashlib.sha256(
+        "".join(
+            path + entry["algorithm"] + entry["hash"]
+            for path, entry in sorted(integrity.items())
+        ).encode()
+    ).digest()
+    binary_path.write_bytes(binary)
+    # Like the main executable, helpers run without library validation so they
+    # can load the re-signed framework beside the official libraries.
+    for helper in sorted((framework / "Versions" / "Current" / "Helpers").glob("*.app")):
+        sign_runtime_bundle(helper, identity, runtime=False)
+    run(["codesign", "--force", "--sign", identity, "--timestamp=none", str(framework)])
 
 
 def patch_info_plist(
@@ -1911,6 +1649,7 @@ def patch_info_plist(
     info["CFBundleExecutable"] = "CodexSubscriptionRouterLauncher"
     info["BundleSigningBaseName"] = "CodexSubscriptionRouter"
     info["CodexMuxSigningTeamIdentifier"] = team_identifier or "adhoc"
+    info["CodexMuxVersion"] = PROJECT_VERSION
     info["CrProductDirName"] = DESKTOP_PROFILE_NAME
     for key in list(info):
         if key.startswith("SU"):
@@ -1932,6 +1671,20 @@ def patch_info_plist(
         plistlib.dump(info, handle, fmt=plistlib.FMT_BINARY, sort_keys=False)
 
 
+def prune_backups(backups: Path, keep: int) -> None:
+    """Drop older backups before a new one is taken; each holds a full app
+    bundle, so only the copy replaced by the newest install is kept."""
+    if not backups.is_dir():
+        return
+    dated = sorted(
+        path for path in backups.iterdir()
+        if path.is_dir() and re.fullmatch(r"\d{8}-\d{6}", path.name)
+    )
+    for stale in dated[:-keep] if keep else dated:
+        shutil.rmtree(stale)
+        print(f"Removed old backup {stale}")
+
+
 def patch_app(
     source: Path,
     destination: Path,
@@ -1939,8 +1692,12 @@ def patch_app(
     allow_adhoc_signing: bool,
     allow_untested_source: bool,
     allow_signing_team_change: bool,
+    stage: Path | None = None,
 ) -> None:
+    """Build the router app for DESTINATION and install it there, or with
+    STAGE leave the finished pair in that directory for install_staged."""
     source = source.expanduser().resolve()
+    stage = stage.expanduser().resolve() if stage is not None else None
     destination = destination.expanduser().resolve()
     if not source.is_dir() or not (source / "Contents" / "Resources" / "app.asar").is_file():
         raise RuntimeError(f"not a ChatGPT app bundle: {source}")
@@ -1949,7 +1706,7 @@ def patch_app(
             "source and destination must be different; "
             "the original app is never patched in place"
         )
-    if destination.exists() and not force:
+    if destination.exists() and not force and stage is None:
         raise RuntimeError(
             f"destination exists: {destination} "
             "(pass --force to create a recoverable backup)"
@@ -1962,7 +1719,8 @@ def patch_app(
     source_build = str(source_info.get("CFBundleVersion", "unknown"))
     source_asar = source / "Contents" / "Resources" / "app.asar"
     source_asar_hash = hashlib.sha256(source_asar.read_bytes()).hexdigest()
-    expected_asar_hash = TESTED_SOURCE_BUILDS.get((source_version, source_build))
+    source_spec = SUPPORTED_BUILDS.get((source_version, source_build), UNTESTED_BUILD)
+    expected_asar_hash = source_spec.asar_sha256
     print(
         f"Source ChatGPT version: {source_version} ({source_build}), "
         f"app.asar {source_asar_hash}"
@@ -1994,10 +1752,12 @@ def patch_app(
             )
     destination.parent.mkdir(parents=True, exist_ok=True)
     installed_computer_use_app = destination.parent / COMPUTER_USE_APP_NAME
-    if force:
+    if force and stage is None:
         ensure_components_are_stopped((destination, installed_computer_use_app))
+    work_parent = destination.parent if stage is None else stage.parent
+    work_parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=".codex-subscription-router-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".codex-subscription-router-", dir=work_parent) as temporary:
         temporary_path = Path(temporary)
         staged_app = temporary_path / destination.name
         staged_computer_use_app = temporary_path / COMPUTER_USE_APP_NAME
@@ -2014,13 +1774,9 @@ def patch_app(
         original_asar = resources / "app.asar"
         print("Patching desktop profile and renderer…")
         run([str(asar), "extract", str(original_asar), str(extracted)])
-        expected_cua_replacements = (
-            EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD.get(
-                (source_version, source_build),
-                EXPECTED_ASAR_CUA_IDENTIFIER_REPLACEMENTS,
-            )
+        patch_asar_computer_use_identity(
+            extracted, source_spec.asar_cua_identifier_replacements
         )
-        patch_asar_computer_use_identity(extracted, expected_cua_replacements)
         patch_desktop_profile(extracted, installed_computer_use_app)
         if signing_identity == "-":
             relax_native_pipe_peer_authorization(extracted)
@@ -2054,8 +1810,10 @@ def patch_app(
             dirs_exist_ok=True,
         )
 
-        bundled_codex = resources / "codex"
-        real_codex = resources / "codex.real"
+        # The official binary keeps its own signature beside the router, which
+        # finds it as `codex.real` in its own directory.
+        bundled_codex = codex_entrypoint(resources)
+        real_codex = bundled_codex.with_name("codex.real")
         if real_codex.exists():
             raise RuntimeError("source app already contains codex.real")
         bundled_codex.rename(real_codex)
@@ -2064,23 +1822,13 @@ def patch_app(
 
         patch_info_plist(staged_app, original_asar, team_identifier)
         print(f"Signing independent app copy with {signing_identity}…")
-        expected_cua_identity_replacements = (
-            EXPECTED_CUA_IDENTIFIER_REPLACEMENTS_BY_BUILD.get(
-                (source_version, source_build),
-                EXPECTED_CUA_IDENTIFIER_REPLACEMENTS,
-            )
-        )
-        cua_service_layout = EXPECTED_CUA_SERVICE_LAYOUT_BY_BUILD.get(
-            (source_version, source_build),
-            DEFAULT_CUA_SERVICE_LAYOUT,
-        )
+        seal_asar_integrity(staged_app, signing_identity)
         sign_independent_app(
             staged_app,
             signing_identity,
             team_identifier,
-            expected_cua_identity_replacements,
-            cua_service_layout,
-            (source_version, source_build) in BUILDS_REQUIRING_DEEP_RESIGN,
+            source_spec.cua_identifier_replacements,
+            source_spec.cua_service_layout,
         )
         verify_signed_code(
             staged_app,
@@ -2108,39 +1856,92 @@ def patch_app(
             team_identifier,
         )
 
-        backup_suffix = time.strftime("%Y%m%d-%H%M%S")
-        backup_directory = DEFAULT_STATE_ROOT / "backups" / backup_suffix
-        app_backup = backup_directory / destination.name
-        helper_backup = backup_directory / installed_computer_use_app.name
-        had_app = destination.exists()
-        had_helper = installed_computer_use_app.exists()
-        if had_app or had_helper:
-            backup_directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            backup_directory.parent.chmod(0o700)
-            backup_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-        try:
-            if had_app:
-                destination.rename(app_backup)
-                print(f"Existing copy moved to {app_backup}")
-            if had_helper:
-                installed_computer_use_app.rename(helper_backup)
-                print(f"Existing Computer Use helper moved to {helper_backup}")
-            staged_app.rename(destination)
-            staged_computer_use_app.rename(installed_computer_use_app)
-        except OSError:
-            failed_directory = backup_directory / "failed-install"
-            failed_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if destination.exists():
-                destination.rename(failed_directory / destination.name)
-            if installed_computer_use_app.exists():
-                installed_computer_use_app.rename(
-                    failed_directory / installed_computer_use_app.name
-                )
-            if app_backup.exists():
-                app_backup.rename(destination)
-            if helper_backup.exists():
-                helper_backup.rename(installed_computer_use_app)
-            raise
+        if stage is not None:
+            stage.mkdir(mode=0o700, exist_ok=True)
+            for built, name in (
+                (staged_app, destination.name),
+                (staged_computer_use_app, COMPUTER_USE_APP_NAME),
+            ):
+                if (stage / name).exists():
+                    shutil.rmtree(stage / name)
+                built.rename(stage / name)
+            print(stage / destination.name)
+            return
+        install_built(
+            staged_app,
+            staged_computer_use_app,
+            destination,
+            installed_computer_use_app,
+        )
+
+
+def install_staged(stage: Path, destination: Path) -> None:
+    """Swap in a pair --stage built for this destination; the app must be quit."""
+    stage = stage.expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    staged_app = stage / destination.name
+    staged_computer_use_app = stage / COMPUTER_USE_APP_NAME
+    installed_computer_use_app = destination.parent / COMPUTER_USE_APP_NAME
+    if not staged_app.is_dir() or not staged_computer_use_app.is_dir():
+        raise RuntimeError(f"no staged build for {destination.name} in {stage}")
+    if destination.exists() and existing_signing_team(destination) != existing_signing_team(
+        staged_app
+    ):
+        raise RuntimeError("the staged build is signed by a different team than the installed one")
+    ensure_components_are_stopped((destination, installed_computer_use_app))
+    install_built(
+        staged_app,
+        staged_computer_use_app,
+        destination,
+        installed_computer_use_app,
+    )
+    stage.rmdir()
+
+
+def install_built(
+    staged_app: Path,
+    staged_computer_use_app: Path,
+    destination: Path,
+    installed_computer_use_app: Path,
+) -> None:
+    """Move a finished app pair into place, keeping the replaced pair as the
+    one backup."""
+    backup_suffix = time.strftime("%Y%m%d-%H%M%S")
+    backup_directory = DEFAULT_STATE_ROOT / "backups" / backup_suffix
+    app_backup = backup_directory / destination.name
+    helper_backup = backup_directory / installed_computer_use_app.name
+    had_app = destination.exists()
+    had_helper = installed_computer_use_app.exists()
+    if had_app or had_helper:
+        prune_backups(DEFAULT_STATE_ROOT / "backups", keep=0)
+        backup_directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        backup_directory.parent.chmod(0o700)
+        backup_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    if had_app:
+        stop_lingering_helpers(destination)
+    try:
+        if had_app:
+            destination.rename(app_backup)
+            print(f"Existing copy moved to {app_backup}")
+        if had_helper:
+            installed_computer_use_app.rename(helper_backup)
+            print(f"Existing Computer Use helper moved to {helper_backup}")
+        staged_app.rename(destination)
+        staged_computer_use_app.rename(installed_computer_use_app)
+    except OSError:
+        failed_directory = backup_directory / "failed-install"
+        failed_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if destination.exists():
+            destination.rename(failed_directory / destination.name)
+        if installed_computer_use_app.exists():
+            installed_computer_use_app.rename(
+                failed_directory / installed_computer_use_app.name
+            )
+        if app_backup.exists():
+            app_backup.rename(destination)
+        if helper_backup.exists():
+            helper_backup.rename(installed_computer_use_app)
+        raise
 
     if LAUNCH_SERVICES_REGISTER.is_file():
         run(
@@ -2160,6 +1961,9 @@ def patch_app(
 def main() -> int:
     args = parse_args()
     try:
+        if args.install_staged:
+            install_staged(args.install_staged, args.destination)
+            return 0
         patch_app(
             args.source,
             args.destination,
@@ -2167,6 +1971,7 @@ def main() -> int:
             args.allow_adhoc_signing,
             args.allow_untested_source,
             args.allow_signing_team_change,
+            args.stage,
         )
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         print(f"patch failed: {error}", file=sys.stderr)

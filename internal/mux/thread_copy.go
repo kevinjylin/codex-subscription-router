@@ -1,6 +1,8 @@
 package mux
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,7 +41,8 @@ func projectionStream(rollout, threadID string) string {
 // turns. Every rollout file is hard-linked into the target's sessions tree,
 // the target's row is pointed at the source's current rollout, and the
 // projection rows of every stream are copied. The files are shared, so the
-// derived rows apply unchanged.
+// derived rows apply unchanged. A forked thread keeps its history in the
+// thread it was forked from, so that thread's copy is brought along too.
 func syncThreadCopy(sourceHome, targetHome, threadID string) error {
 	if !threadIDPattern.MatchString(threadID) {
 		return fmt.Errorf("unexpected thread id %q", threadID)
@@ -49,14 +52,18 @@ func syncThreadCopy(sourceHome, targetHome, threadID string) error {
 		if attempt > 0 {
 			time.Sleep(time.Second)
 		}
-		if err = copyThread(sourceHome, targetHome, threadID); err == nil || !strings.Contains(err.Error(), "database is locked") {
+		if err = copyThread(sourceHome, targetHome, threadID, map[string]struct{}{}); err == nil || !strings.Contains(err.Error(), "database is locked") {
 			return err
 		}
 	}
 	return err
 }
 
-func copyThread(sourceHome, targetHome, threadID string) error {
+func copyThread(sourceHome, targetHome, threadID string, copied map[string]struct{}) error {
+	if _, done := copied[threadID]; done {
+		return nil
+	}
+	copied[threadID] = struct{}{}
 	row, err := querySQLite(
 		stateDatabase(sourceHome),
 		fmt.Sprintf(
@@ -69,6 +76,11 @@ func copyThread(sourceHome, targetHome, threadID string) error {
 	}
 	path, mode, found := strings.Cut(strings.TrimSpace(row), "\t")
 	if !found {
+		if len(copied) > 1 {
+			// A history base the source never indexed still resumes by
+			// file, so its rollouts and streams travel without a row.
+			return copyStreams(sourceHome, targetHome, threadID)
+		}
 		return fmt.Errorf("source does not index thread %s", threadID)
 	}
 	streams := []string{threadID}
@@ -79,6 +91,15 @@ func copyThread(sourceHome, targetHome, threadID string) error {
 		if stream := projectionStream(rollout, threadID); stream != threadID {
 			streams = append(streams, stream)
 		}
+		if base := historyBaseThread(rollout); base != "" && base != threadID {
+			owner := rolloutOwner(sourceHome, base)
+			if owner == threadID {
+				continue
+			}
+			if err := copyThread(sourceHome, targetHome, owner, copied); err != nil {
+				return fmt.Errorf("forked-from thread %s: %w", owner, err)
+			}
+		}
 	}
 	current, err := linkRolloutIntoHome(path, targetHome)
 	if err != nil {
@@ -87,6 +108,25 @@ func copyThread(sourceHome, targetHome, threadID string) error {
 	if err := upsertThreadRow(stateDatabase(sourceHome), stateDatabase(targetHome), threadID, current, mode); err != nil {
 		return err
 	}
+	return copyProjection(sourceHome, targetHome, streams)
+}
+
+// copyStreams links a thread's rollouts and copies their projection rows
+// without touching the target's index.
+func copyStreams(sourceHome, targetHome, threadID string) error {
+	streams := []string{threadID}
+	for _, rollout := range threadRollouts(sourceHome, threadID) {
+		if _, err := linkRolloutIntoHome(rollout, targetHome); err != nil {
+			return err
+		}
+		if stream := projectionStream(rollout, threadID); stream != threadID {
+			streams = append(streams, stream)
+		}
+	}
+	return copyProjection(sourceHome, targetHome, streams)
+}
+
+func copyProjection(sourceHome, targetHome string, streams []string) error {
 	sourceHistory := historyDatabase(sourceHome)
 	if !fileExists(sourceHistory) {
 		return nil
@@ -168,6 +208,52 @@ func ensureHistorySchema(sourceDB, targetDB string) error {
 		"INSERT OR IGNORE INTO _sqlx_migrations SELECT * FROM src._sqlx_migrations;",
 		"DETACH DATABASE src;",
 	}, "\n"))
+}
+
+// historyBaseThread reads the thread whose rollout a fork's history starts
+// from, recorded in the fork's session metadata, or "" for a thread that
+// carries its own history.
+func historyBaseThread(rollout string) string {
+	file, err := os.Open(rollout)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 1<<20)
+	line, err := reader.ReadBytes('\n')
+	if len(line) == 0 && err != nil {
+		return ""
+	}
+	var record struct {
+		Payload struct {
+			HistoryBase struct {
+				ThreadID string `json:"thread_id"`
+			} `json:"history_base"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &record) != nil {
+		return ""
+	}
+	if !threadIDPattern.MatchString(record.Payload.HistoryBase.ThreadID) {
+		return ""
+	}
+	return record.Payload.HistoryBase.ThreadID
+}
+
+var rolloutThreadPattern = regexp.MustCompile(`-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f-]{36})?\.jsonl$`)
+
+// rolloutOwner resolves the thread whose rollout carries a history stream.
+// A fork's history base names the stream it continues from, which is the
+// thread itself for an original rollout and the link id for a continuation
+// file (`<thread>_<link>.jsonl`), so the file name settles which thread to
+// bring along.
+func rolloutOwner(codexHome, streamID string) string {
+	for _, rollout := range threadRollouts(codexHome, streamID) {
+		if match := rolloutThreadPattern.FindStringSubmatch(filepath.Base(rollout)); match != nil {
+			return match[1]
+		}
+	}
+	return streamID
 }
 
 // threadRollouts lists every rollout segment of a thread in a Codex home.

@@ -1,10 +1,14 @@
 const CODEX_MUX_THREAD_API = "http://127.0.0.1:__CODEX_MUX_CONTROL_PORT__/v1";
 const CODEX_MUX_THREAD_TOKEN = "__CODEX_MUX_CONTROL_TOKEN__";
 
+// React, the JSX runtime, and the route hook come from the primary bundle's
+// injected menu, so this bundle only needs its own summary Section.
 function CodexMuxThreadSubscription() {
-  const route = $n(sr);
+  const TE = globalThis.codexMuxReact();
+  const zE = globalThis.codexMuxJsx();
+  const route = globalThis.codexMuxUseRoute();
   const threadId =
-    route.value.routeKind === "local-thread" ? route.value.conversationId : null;
+    route?.value?.routeKind === "local-thread" ? route.value.conversationId : null;
   const [account, setAccount] = TE.useState(null);
 
   TE.useEffect(() => {
@@ -31,35 +35,30 @@ function CodexMuxThreadSubscription() {
     };
 
     refresh();
-    const events = new EventSource(
-      `${CODEX_MUX_THREAD_API}/events?token=${encodeURIComponent(CODEX_MUX_THREAD_TOKEN)}`,
-    );
-    events.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (
-          payload.type === "account-updated" ||
-          (payload.type === "thread-failed-over" &&
-            payload.data?.threadId === threadId)
-        ) {
-          refresh();
-        }
-      } catch {}
-    };
+    const unsubscribe = globalThis.codexMuxSubscribe?.((payload) => {
+      if (
+        payload.type === "account-updated" ||
+        (["thread-moved", "thread-failed-over"].includes(payload.type) &&
+          payload.data?.threadId === threadId)
+      ) {
+        refresh();
+      }
+    });
     const warmupTimer = setTimeout(refresh, 2_000);
     const timer = setInterval(refresh, 30_000);
     return () => {
       active = false;
       clearTimeout(warmupTimer);
       clearInterval(timer);
-      events.close();
+      unsubscribe?.();
     };
   }, [threadId]);
 
   if (!account) return null;
   const weekly = codexMuxThreadWeeklyWindow(account.rateLimits);
   const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
-  const depleted = remaining === 0;
+  const credits = globalThis.codexMuxCredits?.(account.rateLimits) ?? null;
+  const depleted = remaining === 0 && credits == null;
   const AccountAvatar = globalThis.CodexMuxAccountAvatar;
   return (0, zE.jsx)(K.Section, {
     sectionKey: "codex-mux-subscription",
@@ -92,7 +91,9 @@ function CodexMuxThreadSubscription() {
               ? "Usage unavailable"
               : depleted
                 ? "Depleted"
-                : `${Math.round(remaining)}% remaining`,
+                : remaining === 0
+                  ? credits
+                  : `${Math.round(remaining)}% remaining`,
         }),
       ],
     }),

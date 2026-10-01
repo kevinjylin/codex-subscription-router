@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/b-nnett/codex-subscription-router/internal/state"
@@ -31,9 +32,38 @@ type RateLimitWindow struct {
 }
 
 type RateLimits struct {
-	Primary              *RateLimitWindow `json:"primary"`
-	Secondary            *RateLimitWindow `json:"secondary"`
-	RateLimitReachedType any              `json:"rateLimitReachedType"`
+	Primary              *RateLimitWindow  `json:"primary"`
+	Secondary            *RateLimitWindow  `json:"secondary"`
+	Credits              *RateLimitCredits `json:"credits,omitempty"`
+	RateLimitReachedType any               `json:"rateLimitReachedType"`
+}
+
+// RateLimitCredits is the purchased balance Codex spends once a plan's
+// windows are exhausted; an account holding any can still take turns.
+type RateLimitCredits struct {
+	HasCredits bool   `json:"hasCredits"`
+	Unlimited  bool   `json:"unlimited"`
+	Balance    string `json:"balance"`
+}
+
+// creditsAvailable reports whether purchased credits can carry an account
+// past an exhausted window.
+func creditsAvailable(limits *RateLimits) bool {
+	return limits != nil && limits.Credits != nil &&
+		(limits.Credits.HasCredits || limits.Credits.Unlimited)
+}
+
+// windowCapacity reports whether an account's plan windows still have room.
+func windowCapacity(limits *RateLimits) bool {
+	if limits == nil {
+		return true
+	}
+	for _, window := range []*RateLimitWindow{limits.Primary, limits.Secondary} {
+		if window != nil && window.UsedPercent >= 100 {
+			return false
+		}
+	}
+	return true
 }
 
 type AccountSnapshot struct {
@@ -62,6 +92,7 @@ type RouteReason struct {
 	ResetCreditExpiresAt *int64   `json:"resetCreditExpiresAt,omitempty"`
 	UrgencyScore         *float64 `json:"urgencyScore,omitempty"`
 	ThreadCount          int      `json:"threadCount"`
+	Preferred            bool     `json:"preferred,omitempty"`
 }
 
 func (m *Multiplexer) Accounts(ctx context.Context) []AccountSnapshot {
@@ -149,7 +180,7 @@ func (m *Multiplexer) UpdateAccount(ctx context.Context, id string, label *strin
 }
 
 func (m *Multiplexer) ThreadAccount(ctx context.Context, threadID string) (AccountSnapshot, error) {
-	accountID, ok := m.store.ThreadOwner(threadID)
+	accountID, ok := m.threadOwner(threadID)
 	if !ok {
 		return AccountSnapshot{}, fmt.Errorf("thread %q has no subscription assignment", threadID)
 	}
@@ -423,6 +454,7 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 	weekly := make([]*RateLimitWindow, 0, len(snapshots))
 	hasSubscription := false
 	hasCapacity := false
+	var credits *RateLimitCredits
 	for _, snapshot := range snapshots {
 		if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
 			continue
@@ -431,6 +463,9 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 		accountFiveHour, accountWeekly := fiveHourAndWeeklyWindows(snapshot.RateLimits)
 		fiveHour = append(fiveHour, accountFiveHour)
 		weekly = append(weekly, accountWeekly)
+		if snapshot.RateLimits != nil {
+			credits = pooledCredits(credits, snapshot.RateLimits.Credits)
+		}
 		if accountHasCapacity(snapshot) {
 			hasCapacity = true
 		}
@@ -441,11 +476,32 @@ func aggregateRateLimits(snapshots []AccountSnapshot) (*RateLimits, error) {
 	result := &RateLimits{
 		Primary:   averageRateLimitWindow(fiveHour),
 		Secondary: averageRateLimitWindow(weekly),
+		Credits:   credits,
 	}
 	if !hasCapacity {
 		result.RateLimitReachedType = "rate_limit_reached"
 	}
 	return result, nil
+}
+
+// pooledCredits sums the purchased balances of every subscription, so the
+// desktop offers to continue on credits whenever any account holds some.
+func pooledCredits(total, next *RateLimitCredits) *RateLimitCredits {
+	if next == nil {
+		return total
+	}
+	if total == nil {
+		copied := *next
+		return &copied
+	}
+	total.HasCredits = total.HasCredits || next.HasCredits
+	total.Unlimited = total.Unlimited || next.Unlimited
+	left, leftErr := strconv.ParseFloat(total.Balance, 64)
+	right, rightErr := strconv.ParseFloat(next.Balance, 64)
+	if leftErr == nil && rightErr == nil {
+		total.Balance = strconv.FormatFloat(left+right, 'f', -1, 64)
+	}
+	return total
 }
 
 // fiveHourAndWeeklyWindows normalizes the two Codex quota windows by cadence.
@@ -543,8 +599,4 @@ func duration(window *RateLimitWindow) int64 {
 		return 0
 	}
 	return *window.WindowDurationMins
-}
-
-func contextWithControlTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, 20*time.Second)
 }

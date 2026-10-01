@@ -103,3 +103,20 @@ func TestFailedManualMoveDoesNotChangeThreadOwner(t *testing.T) {
 		t.Fatalf("missing move error: %s", output.String())
 	}
 }
+
+func TestManualSelectionAcceptsCreditsAfterShortWindowExhaustion(t *testing.T) {
+	m, other := selectionFixture(t)
+	short, week := int64(300), int64(10080)
+	m.snapshots.updateRateLimits(other, RateLimits{
+		Primary:   &RateLimitWindow{UsedPercent: 100, WindowDurationMins: &short},
+		Secondary: &RateLimitWindow{UsedPercent: 20, WindowDurationMins: &week},
+		Credits:   &RateLimitCredits{HasCredits: true, Balance: "750"},
+	}, m.now())
+	if err := m.SelectAccount(context.Background(), other); err != nil {
+		t.Fatalf("credits should keep this selection available: %v", err)
+	}
+	chosen, _, err := m.chooseAccount(context.Background())
+	if err != nil || chosen.ID != other {
+		t.Fatalf("credited selection was not routed: %s %v", chosen.ID, err)
+	}
+}

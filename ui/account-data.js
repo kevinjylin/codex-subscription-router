@@ -2,14 +2,24 @@ const CODEX_MUX_API = "http://127.0.0.1:__CODEX_MUX_CONTROL_PORT__/v1";
 const CODEX_MUX_TOKEN = "__CODEX_MUX_CONTROL_TOKEN__";
 
 async function codexMuxRequest(path, options = {}) {
-  const response = await fetch(`${CODEX_MUX_API}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Codex-Mux-Token": CODEX_MUX_TOKEN,
-      ...options.headers,
-    },
-  });
+  const send = () =>
+    fetch(`${CODEX_MUX_API}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Codex-Mux-Token": CODEX_MUX_TOKEN,
+        ...options.headers,
+      },
+    });
+  let response;
+  try {
+    response = await send();
+  } catch (error) {
+    // A pooled connection the server closed while idle fails on reuse;
+    // a read is safe to send again on a fresh one.
+    if (options.method && options.method !== "GET") throw error;
+    response = await send();
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
   return body;
@@ -39,10 +49,34 @@ function codexMuxRememberAccounts(accounts) {
   } catch {}
 }
 
-function codexMuxEvents() {
-  return new EventSource(
-    `${CODEX_MUX_API}/events?token=${encodeURIComponent(CODEX_MUX_TOKEN)}`,
-  );
+// Every surface listens to the one event stream: the renderer may only hold
+// a few connections to the router at once, and each open stream is one.
+const codexMuxEventListeners = new Set();
+let codexMuxEventSource = null;
+
+function codexMuxSubscribe(listener) {
+  codexMuxEventListeners.add(listener);
+  if (codexMuxEventSource == null) {
+    codexMuxEventSource = new EventSource(
+      `${CODEX_MUX_API}/events?token=${encodeURIComponent(CODEX_MUX_TOKEN)}`,
+    );
+    codexMuxEventSource.onmessage = (event) => {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      for (const subscriber of codexMuxEventListeners) subscriber(payload);
+    };
+  }
+  return () => {
+    codexMuxEventListeners.delete(listener);
+    if (codexMuxEventListeners.size === 0 && codexMuxEventSource != null) {
+      codexMuxEventSource.close();
+      codexMuxEventSource = null;
+    }
+  };
 }
 
 async function codexMuxFetchAccounts() {
@@ -108,10 +142,11 @@ async function codexMuxFilterUsageStatus(status) {
       (!account.authType || account.authType === "chatgpt"),
   );
   if (pool.length < 2) return status;
-  const poolHasCapacity = pool.some((account) => {
-    return [account.rateLimits?.primary, account.rateLimits?.secondary]
-      .every((window) => window == null || window.usedPercent < 100);
-  });
+  const poolHasCapacity = pool.some((account) =>
+    [account.rateLimits?.primary, account.rateLimits?.secondary].every(
+      (window) => window == null || window.usedPercent < 100,
+    ) || codexMuxCredits(account.rateLimits) != null,
+  );
   const rateLimit = status.rate_limit;
   const pooledRateLimit =
     rateLimit == null
@@ -254,6 +289,16 @@ async function codexMuxStartRemoteControlPairing(accountId) {
   );
 }
 
+// codexMuxCredits is the purchased balance an account can spend once its
+// plan windows are exhausted, or null when it holds none.
+function codexMuxCredits(rateLimits) {
+  const credits = rateLimits?.credits;
+  if (!credits || !(credits.hasCredits || credits.unlimited)) return null;
+  if (credits.unlimited) return "unlimited credits";
+  const balance = Number(credits.balance);
+  return `${Number.isFinite(balance) ? Math.round(balance) : credits.balance} credits`;
+}
+
 function codexMuxWeeklyWindow(rateLimits) {
   const exact = codexMuxWindowForDuration(
     rateLimits,
@@ -287,7 +332,8 @@ function codexMuxUsageWindows(rateLimits) {
 // The menu, profile, plugin, and thread surfaces render from other bundles.
 Object.assign(globalThis, {
   codexMuxRequest,
-  codexMuxEvents,
+  codexMuxSubscribe,
+  codexMuxCredits,
   codexMuxCachedAccounts,
   codexMuxRememberAccounts,
   codexMuxFetchAccounts,

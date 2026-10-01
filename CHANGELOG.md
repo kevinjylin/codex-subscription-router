@@ -5,16 +5,207 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ## [Unreleased]
 
+### Fixed
+
+- Merge manual session account switching and the stable launcher directory
+  with the newer router. Show five-hour and weekly limits for every account
+  and pool quota windows by duration, including when their slots are swapped.
+- Respect both quota windows when routing while retaining purchased-credit
+  support, the composer picker, chat moves, and router updates.
+
+## [0.6.0] - 2026-10-01
+
 ### Added
 
+- Compatibility with official ChatGPT build `12553` (26.928.31416), which
+  continues to bundle Codex 0.159.2. Builds `12246` and `12404` remain supported.
+
+### Removed
+
+- Compatibility with build `12111`, outside the newest three official builds.
+
+## [0.5.0] - 2026-09-30
+
+### Added
+
+- Compatibility with official ChatGPT build `12404` (26.928.21956), which
+  bundles Codex 0.159.2.
+- Compatibility with build `12111` (26.924.51851) to cover the newest three
+  official builds alongside `12246`.
+
+### Changed
+
+- The `CODEX_MUX_TRACE` log names the MCP server, tool, or resource each
+  plugin request targets, without its arguments.
+
+### Removed
+
+- Compatibility with build `11645`.
+
+## [0.4.4] - 2026-09-29
+
+### Fixed
+
+- Chats on a subscription other than Primary lost every notification outside
+  a few thread and turn prefixes, including MCP server startup status, MCP
+  app event streams, resolved approvals, errors, warnings, and process
+  output. Code Review, which opens its own chat on the subscription new chats
+  start on, could not load pull requests. Notifications about a chat, or
+  answering a request routed to that subscription, now reach the app; only
+  account-wide ones stay limited to Primary.
+
+### Added
+
+- `CODEX_MUX_TRACE` records the multiplexer's routing and replies for
+  debugging; see CONTRIBUTING.md.
+
+## [0.4.3] - 2026-09-29
+
+### Fixed
+
+- Chats bypassed the router since build 11645. The desktop's startup
+  preflight became the multiplexer, and ignored the signal that ends it
+  because its stdin stays open, so it kept the slot and the chat connection
+  that starts a second later ran as a plain app-server on Primary: no
+  pooling, failover, or subscription choice. The multiplexer now hands back
+  the slot and control port on that signal, and a connection that finds the
+  slot claimed moments ago waits for it.
+- Moving or inspecting a chat the router never saw start failed with "has no
+  subscription assignment"; such a chat now belongs to the account whose home
+  holds it.
+
+## [0.4.2] - 2026-09-29
+
+### Fixed
+
+- Choosing the subscription new chats start on failed with "Failed to fetch":
+  the control API's CORS preflight did not allow the `PUT` the composer
+  account picker sends. A test now checks every method the renderer sends.
+
+## [0.4.1] - 2026-09-29
+
+### Added
+
+- A **Models…** row in the profile menu when the Primary Codex home sends
+  OpenAI traffic through a local proxy such as opencodex; it opens that
+  proxy's model page, where the models the picker shows are chosen.
+
+## [0.4.0] - 2026-09-29
+
+### Added
+
+- Compatibility with official ChatGPT build `12246` (26.928.20755), which
+  bundles Codex 0.159.0, the first version the backend offers GPT-6.1 Sol.
+- The usage-window selection and the rate-limit banner titles are per-build
+  profile fields, since 12246 moved the first and dropped the banner.
+
+### Changed
+
+- Only the newest official build is ported; intermediate builds nobody
+  installs are skipped.
+
+### Removed
+
+- Compatibility with builds `8881` and `10492`.
+
+## [0.3.3] - 2026-09-29
+
+### Fixed
+
+- Build `11645` showed the model picker twice in the composer: its footer
+  patch stored a hand-kept replacement that named the wrong element. Composer
+  patches now keep only the anchor and insert the account picker into it, so
+  a port can no longer get the replacement wrong.
+
+## [0.3.2] - 2026-09-28
+
+### Fixed
+
+- Clicking **Update available** without a staged build closed the app for
+  good; the updater now reopens it whether or not the install went through.
+- Each launch check left the staged app's modifier-key monitor running.
+
+## [0.3.1] - 2026-09-28
+
+### Fixed
+
+- Installing an update failed while the desktop's modifier-key monitor,
+  which outlives the app, was still running. It and Chromium's crash
+  reporters no longer count as a running app, and an install ends the ones
+  the replaced bundle left behind.
+- The updater agent ran a version-pinned Python path that breaks when
+  Homebrew upgrades Python; it now uses `python3` from `PATH`.
+
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- Updates from this repository's published releases. `scripts/update.py
+  enable` installs a launch agent that builds each new release on the Mac
+  against the newest official build it supports, boots it with
+  `launch_check.py`, and hands it to the app's own update UI: the
+  **Update available** button, **Check for Updates…**, and the install
+  confirmation. Installing quits, swaps, and relaunches the app; with
+  **Update automatically** checked in the profile menu, a ready update
+  installs when the app quits. Old release sources, staged builds, and
+  unsupported official builds are removed as it goes.
+- `patch_app.py --stage` builds for an installed app while it keeps running,
+  and `--install-staged` swaps that build in once the app has quit.
+
+### Removed
+
+- `patch_app.py --discard-existing`; stage with `--stage` instead, and delete
+  a broken install by path before replacing it.
+- Unused code: five unreachable Go functions, an unused avatar component, and
+  a porting helper.
+
+### Fixed
+
+- The installer's running-app check never matched a path with parentheses,
+  such as `Codex (router).app`, and counted Chromium's lingering crash
+  reporters as a running app.
+
+## [0.2.1] - 2026-09-28
+
+### Fixed
+
+- Build `11645` crashed at launch. Its Electron seals `Info.plist`'s ASAR
+  integrity entry with a digest compiled into the framework, so the patcher
+  now restamps that digest for the repacked archive and re-signs the
+  framework and its helpers.
+- Installs no longer keep a copy of the replaced Computer Use helper in
+  `~/.codex/computer-use`.
+
+### Added
+
+- `scripts/launch_check.py` boots a staged app until its window talks to
+  Codex, and `verify_build.py` fails on an integrity seal format it does not
+  know.
+
+## [0.2.0] - 2026-09-27
+
+### Added
+
+- Compatibility with official ChatGPT builds `8881`, `10492`, and `11645`
+  (Codex 0.154 to 0.158); builds `6396`, `6662`, and `7746` are no longer
+  supported. Renderer patches land in whichever bundle holds their anchor,
+  and the patcher wraps the Codex CLI whether it ships loose or as the nested
+  `CodexCLI.app`.
+- A composer account picker: choose the subscription a chat runs on, move a
+  chat there with its history, or pin new chats to one subscription.
+- Purchased credits count as capacity: an account holding credits keeps
+  routing, and the menus show its balance instead of calling it depleted.
+- Forks get their own generated title after their first turn.
+- Porting tooling: `scripts/appcast.py` detects and fetches new official
+  builds, `scripts/port_renderer.py` derives a build profile from the newest
+  supported one, `scripts/verify_build.py` applies every app.asar patch and
+  parses the result, `scripts/live_seed.py` prepares the live move test, and
+  the `port-chatgpt-build` agent skill describes the whole procedure.
 - Model-aware routing: a new chat that names an OpenAI model goes to a
   subscription the backend lets run it, and switching an existing chat to a
   model its subscription cannot run is refused with the subscriptions that
   can, instead of the backend's error. Models served through another
   provider are not gated.
-- Compatibility with official ChatGPT `26.810.52044` (build `6662`) and
-  `26.901.22334` (build `7746`), whose renderer splits data access and UI
-  across bundles.
 - One-command installer with prerequisite checks, signed rebuilds, recoverable
   upgrades, and automatic launch.
 - Reset-aware routing that prioritizes weekly quota at risk of expiring and
@@ -106,5 +297,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.6.0
+[0.5.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.5.0
+[0.4.4]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.4
+[0.4.3]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.3
+[0.4.2]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.2
+[0.4.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.1
+[0.4.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.0
+[0.3.3]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.3.3
+[0.3.2]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.3.2
+[0.3.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.3.1
+[0.3.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.3.0
+[0.2.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.2.1
+[0.2.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.2.0
 [0.1.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.1.0
