@@ -165,7 +165,6 @@ function CodexMuxAccountMenu() {
     () => !codexMuxCachedAccounts().some((account) => account.connected),
   );
   const [busy, setBusy] = kXc.useState(false);
-  const [selectedAccountId, setSelectedAccountId] = kXc.useState("");
   const [error, setError] = kXc.useState("");
   const [login, setLogin] = kXc.useState(null);
   const [codeCopied, setCodeCopied] = kXc.useState(false);
@@ -182,8 +181,6 @@ function CodexMuxAccountMenu() {
     try {
       const nextAccounts = await codexMuxFetchAccounts();
       setAccounts(nextAccounts);
-      const selection = await codexMuxRequest("/account-selection");
-      setSelectedAccountId(selection.accountId || "");
       setError("");
       if (nextAccounts.some((account) => account.connected)) setLoading(false);
     } catch (requestError) {
@@ -201,7 +198,7 @@ function CodexMuxAccountMenu() {
       ) {
         setLogin(null);
       }
-      if (payload.type === "account-updated" || payload.type === "account-selection-changed") refresh();
+      if (payload.type === "account-updated") refresh();
     });
     const warmupTimer = setTimeout(refresh, 2_000);
     const loadingDeadline = setTimeout(() => {
@@ -300,21 +297,6 @@ function CodexMuxAccountMenu() {
       await navigator.clipboard.writeText(account.email);
       setEmailCopied(true);
     } catch {}
-  }
-
-  async function switchAccount(accountId, event) {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      const result = await codexMuxSelectAccount(accountId);
-      setSelectedAccountId(result.accountId || "");
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setBusy(false);
-    }
   }
 
   function viewAccountUsage(account, event) {
@@ -447,13 +429,6 @@ function CodexMuxAccountMenu() {
         onSelect: (event) => copyEmail(account, event),
         children: "Copy email address",
       }, `codex-mux-account-${account.id}-email`));
-      rows.push((0, e7.jsx)(_H, {
-        LeftIcon: CodexMuxSwitchIcon,
-        SubText: "Use for new tasks and next messages this session",
-        disabled: busy || selectedAccountId === account.id,
-        onSelect: (event) => switchAccount(account.id, event),
-        children: selectedAccountId === account.id ? "Selected account" : busy ? "Switching…" : "Switch to account",
-      }, `codex-mux-account-${account.id}-select`));
       rows.push(
         (0, e7.jsx)(
           _H,
@@ -503,14 +478,6 @@ function CodexMuxAccountMenu() {
       ),
     );
   }
-
-  rows.push((0, e7.jsx)(_H, {
-    LeftIcon: CodexMuxSwitchIcon,
-    SubText: selectedAccountId ? "Clear the account selection" : "Choose accounts based on available usage",
-    disabled: busy || !selectedAccountId,
-    onSelect: (event) => switchAccount("", event),
-    children: selectedAccountId ? "Use automatic routing" : "Automatic routing enabled",
-  }, "codex-mux-automatic-routing"));
 
   if (error) {
     rows.push(
@@ -1166,7 +1133,7 @@ function CodexMuxComposerAccount() {
         });
         setPreferredId(accountId || null);
       }
-      // A direct composer choice supersedes the profile menu's session override.
+      // Clear any legacy session override after a direct composer choice.
       await codexMuxSelectAccount("");
       setSessionSelectionId(null);
       setOpen(false);

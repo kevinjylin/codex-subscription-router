@@ -21,7 +21,7 @@ function loadAccountData() {
     `${source}\n` +
       `globalThis.__test = {` +
       `codexMuxFiveHourWindow, codexMuxWeeklyWindow, codexMuxUsageWindows, ` +
-      `codexMuxWindowsForNativeCadence, codexMuxPooledUsageWindow` +
+      `codexMuxWindowsForNativeCadence, codexMuxPooledUsageWindow, codexMuxResetInfo` +
       `};`,
     context,
     { filename },
@@ -96,6 +96,95 @@ test("does not present one known cadence as both limits", () => {
   assert.equal(helpers.codexMuxWeeklyWindow(fiveHourOnly), null);
 });
 
+test("reset info converts Unix seconds to local date and time with a time zone", () => {
+  const previousTimezone = process.env.TZ;
+  try {
+    const seconds = Date.parse("2026-10-02T00:30:00Z") / 1000;
+    process.env.TZ = "America/Los_Angeles";
+    const helpers = loadAccountData();
+    const info = helpers.codexMuxResetInfo(window(40, 10080, seconds), seconds * 1000 - 60_000);
+    assert.equal(info.dateTime, "2026-10-02T00:30:00.000Z");
+    assert.match(info.label, /Oct 1, 2026/);
+    assert.match(info.label, /5:30 PM PDT/);
+    assert.equal(info.countdown, "in 1m");
+    process.env.TZ = "UTC";
+    const utc = helpers.codexMuxResetInfo(window(40, 10080, seconds));
+    assert.match(utc.label, /Oct 2, 2026/);
+    assert.match(utc.label, /12:30 AM UTC/);
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
+});
+
+test("reset countdown handles days, hours, under a minute, and expired snapshots", () => {
+  const helpers = loadAccountData();
+  const now = Date.parse("2026-10-01T00:00:00Z");
+  const countdown = (minutes) => helpers.codexMuxResetInfo(
+    window(40, 10080, (now + minutes * 60_000) / 1000), now,
+  ).countdown;
+  assert.equal(countdown(2 * 1440 + 3 * 60), "in 2d 3h");
+  assert.equal(countdown(60 + 20), "in 1h 20m");
+  assert.equal(countdown(0.1), "in 1m");
+  assert.equal(countdown(0), "Awaiting usage update");
+  assert.equal(countdown(-60), "Awaiting usage update");
+  for (const resetsAt of [null, undefined, 0, -1, NaN, Infinity, 1e20, "1790899200"]) {
+    assert.equal(helpers.codexMuxResetInfo({ resetsAt }, now), null);
+  }
+});
+
+function renderThreadSubscription(rateLimits) {
+  const jsx = (type, props) => ({ type, props });
+  const context = vm.createContext({
+    K: { Section: "section" },
+    localStorage: { getItem: () => null },
+    codexMuxReact: () => ({ useState: () => [{ label: "My account", rateLimits }], useEffect() {} }),
+    codexMuxJsx: () => ({ jsx, jsxs: jsx }),
+    codexMuxUseRoute: () => ({ value: { routeKind: "local-thread", conversationId: "thread" } }),
+  });
+  vm.runInContext(`(() => { ${fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8")} })();`, context);
+  vm.runInContext(`${fs.readFileSync(path.join(__dirname, "thread-subscription.js"), "utf8")}\n globalThis.__render = CodexMuxThreadSubscription;`, context);
+  const nodes = [];
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    nodes.push(node);
+    const children = node.props?.children;
+    for (const child of Array.isArray(children) ? children : [children]) walk(child);
+  }
+  walk(context.__render());
+  return nodes;
+}
+
+test("upper-right Subscription renders both reset times even with swapped quota slots", () => {
+  const seconds = Date.parse("2030-10-02T00:30:00Z") / 1000;
+  const nodes = renderThreadSubscription({ primary: window(40, 10080, seconds), secondary: window(20, 300, seconds - 86400) });
+  assert.equal(nodes[0].props.title, "Subscription");
+  assert.ok(nodes.some((node) => node.props.children === "Weekly resets"));
+  assert.ok(nodes.some((node) => node.props.children === "5-hour resets"));
+  assert.deepEqual(nodes.filter((node) => node.type === "time").map((node) => node.props.dateTime), [
+    "2030-10-01T00:30:00.000Z", "2030-10-02T00:30:00.000Z",
+  ]);
+  assert.ok(nodes.some((node) => node.props.children === "60% remaining"));
+  assert.ok(nodes.some((node) => typeof node.props.children === "string" && node.props.children.startsWith("in ")));
+});
+
+test("Subscription keeps missing reset times separate for each cadence", () => {
+  for (const rateLimits of [null, { primary: window(40, 10080) }]) {
+    const nodes = renderThreadSubscription(rateLimits);
+    assert.equal(nodes.filter((node) => node.props.children === "Reset time unavailable").length, 2);
+    assert.ok(!nodes.some((node) => node.type === "time"));
+  }
+  for (const duration of [300, 10080]) {
+    const nodes = renderThreadSubscription({ primary: window(40, duration, 1_800_000_000) });
+    const sections = nodes.filter((node) => node.props["data-codex-mux-reset"]);
+    const available = sections.find((node) => node.props["data-codex-mux-reset"] === (duration === 300 ? "five-hour" : "weekly"));
+    const unavailable = sections.find((node) => node !== available);
+    assert.ok(available.props.children.some((node) => node?.type === "time"));
+    assert.ok(unavailable.props.children.some((node) => node?.props.children === "Reset time unavailable"));
+    assert.equal(nodes.filter((node) => node.type === "time").length, 1);
+  }
+});
+
 
 test("manual selection posts the selected account and propagates rejection", async () => {
   const source = fs.readFileSync(path.join(__dirname, "account-data.js"), "utf8");
@@ -154,7 +243,7 @@ function loadMenu(accounts, { fetch, openModal } = {}) {
   };
 }
 
-test("Switch to account menu action selects routing without opening usage", async () => {
+test("profile account menu keeps management actions without session switching", () => {
   const requests = [];
   const { render } = loadMenu([{ id: "other", label: "Other", enabled: true, connected: true }], {
     fetch: async (url, options) => {
@@ -164,11 +253,12 @@ test("Switch to account menu action selects routing without opening usage", asyn
   });
   const event = { preventDefault() {} };
   render().find((row) => row.key === "codex-mux-account-other").props.onSelect(event);
-  await render().find((row) => row.props.children === "Switch to account").props.onSelect(event);
-  assert.equal(JSON.parse(requests[0].options.body).accountId, "other");
-  assert.ok(render().some((row) => row.props.children === "Selected account"));
-  await render().find((row) => row.props.children === "Use automatic routing").props.onSelect(event);
-  assert.equal(JSON.parse(requests[1].options.body).accountId, "");
+  const rows = render();
+  assert.ok(rows.some((row) => row.props.children === "View account usage"));
+  assert.ok(rows.some((row) => row.props.children === "Copy email address"));
+  assert.ok(!rows.some((row) => row.key === "codex-mux-account-other-select"));
+  assert.ok(!rows.some((row) => row.key === "codex-mux-automatic-routing"));
+  assert.equal(requests.length, 0);
 });
 
 function iconLabels(row) {
@@ -252,7 +342,7 @@ for (const credits of [false, true]) {
 }
 
 
-test("composer choice clears the profile session override after saving its new-chat preference", async () => {
+test("composer choice clears a legacy session override after saving its new-chat preference", async () => {
   const requests = [];
   const accounts = [
     { id: "plus", label: "Plus", enabled: true, connected: true },

@@ -55,7 +55,11 @@ function CodexMuxThreadSubscription() {
   }, [threadId]);
 
   if (!account) return null;
-  const weekly = codexMuxThreadWeeklyWindow(account.rateLimits);
+  const weekly = globalThis.codexMuxWeeklyWindow(account.rateLimits);
+  const resets = [
+    { cadence: "five-hour", title: "5-hour resets", window: globalThis.codexMuxFiveHourWindow(account.rateLimits) },
+    { cadence: "weekly", title: "Weekly resets", window: weekly },
+  ];
   const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
   const credits = globalThis.codexMuxCredits?.(account.rateLimits) ?? null;
   const depleted = remaining === 0 && credits == null;
@@ -64,47 +68,68 @@ function CodexMuxThreadSubscription() {
     sectionKey: "codex-mux-subscription",
     title: "Subscription",
     children: (0, zE.jsxs)("div", {
-      className: "flex min-h-9 items-center justify-between gap-3 py-1 text-sm",
+      className: "flex flex-col gap-2 py-1",
       children: [
         (0, zE.jsxs)("div", {
-          className: "flex min-w-0 items-center gap-2",
+          className: "flex min-h-9 items-center justify-between gap-3 py-1 text-sm",
           children: [
-            AccountAvatar
-              ? (0, zE.jsx)(AccountAvatar, {
-                  imageUrl: account.profileImageUrl,
-                  label: account.label,
-                  className: "size-5 shrink-0",
-                })
-              : null,
+            (0, zE.jsxs)("div", {
+              className: "flex min-w-0 items-center gap-2",
+              children: [
+                AccountAvatar
+                  ? (0, zE.jsx)(AccountAvatar, {
+                      imageUrl: account.profileImageUrl,
+                      label: account.label,
+                      className: "size-5 shrink-0",
+                    })
+                  : null,
+                (0, zE.jsx)("span", {
+                  className: "truncate text-token-text-primary",
+                  children: account.planLabel
+                    ? `${account.label} · ${account.planLabel}`
+                    : account.label,
+                }),
+              ],
+            }),
             (0, zE.jsx)("span", {
-              className: "truncate text-token-text-primary",
-              children: account.planLabel
-                ? `${account.label} · ${account.planLabel}`
-                : account.label,
+              className: "shrink-0 tabular-nums text-token-description-foreground",
+              children:
+                remaining == null
+                  ? "Usage unavailable"
+                  : depleted
+                    ? "Depleted"
+                    : remaining === 0
+                      ? credits
+                      : `${Math.round(remaining)}% remaining`,
             }),
           ],
         }),
-        (0, zE.jsx)("span", {
-          className: "shrink-0 tabular-nums text-token-description-foreground",
-          children:
-            remaining == null
-              ? "Usage unavailable"
-              : depleted
-                ? "Depleted"
-                : remaining === 0
-                  ? credits
-                  : `${Math.round(remaining)}% remaining`,
+        ...resets.map(({ cadence, title, window }) => {
+          const reset = globalThis.codexMuxResetInfo(window);
+          return (0, zE.jsxs)("div", {
+            className: "flex flex-col gap-1 text-xs text-token-description-foreground",
+            "data-codex-mux-reset": cadence,
+            children: [
+              (0, zE.jsx)("span", {
+                className: "font-medium text-token-text-primary",
+                children: title,
+              }),
+              reset
+                ? (0, zE.jsx)("time", {
+                    dateTime: reset.dateTime,
+                    children: reset.label,
+                  })
+                : (0, zE.jsx)("span", { children: "Reset time unavailable" }),
+              reset
+                ? (0, zE.jsx)("span", {
+                    className: "tabular-nums",
+                    children: reset.countdown,
+                  })
+                : null,
+            ],
+          }, cadence);
         }),
       ],
     }),
   });
-}
-
-function codexMuxThreadWeeklyWindow(rateLimits) {
-  const windows = [rateLimits?.primary, rateLimits?.secondary].filter(Boolean);
-  windows.sort(
-    (left, right) =>
-      (left.windowDurationMins || 0) - (right.windowDurationMins || 0),
-  );
-  return windows.at(-1) || null;
 }

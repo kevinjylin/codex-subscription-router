@@ -5,13 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ## [Unreleased]
 
+### Added
+
+- Show the current chat's 5-hour and weekly reset dates, local times and time
+  zones, and countdowns in the upper-right Subscription section.
+
 ### Fixed
 
-- Merge manual session account switching and the stable launcher directory
-  with the newer router. Show five-hour and weekly limits for every account
+- Forward the router's Computer Use socket path to production MCP runtimes;
+  callers no longer connect to the missing Apple-team group-container socket.
+- Authenticate Appshots and Computer Use callers in ad-hoc builds without an
+  Apple developer certificate, using local process and executable checks.
+- Read the signing team from a disposable signed executable instead of the
+  certificate display name, whose parenthesized value can differ from its team.
+- Merge the stable launcher directory with the newer router. Show five-hour
+  and weekly limits for every account
   and pool quota windows by duration, including when their slots are swapped.
 - Respect both quota windows when routing while retaining purchased-credit
   support, the composer picker, chat moves, and router updates.
+
+### Removed
+
+- Session account switching and its automatic-routing action in the profile
+  menu. Use the composer account picker to move chats or set the default for
+  new chats; profile account management and usage remain available.
 
 ## [0.6.0] - 2026-10-01
 

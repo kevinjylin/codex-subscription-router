@@ -329,6 +329,32 @@ function codexMuxUsageWindows(rateLimits) {
     }));
 }
 
+function codexMuxResetInfo(window, now = Date.now()) {
+  const seconds = window?.resetsAt;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  const reset = new Date(seconds * 1_000);
+  if (!Number.isFinite(reset.getTime())) return null;
+  const minutes = Math.ceil((reset.getTime() - now) / 60_000);
+  const days = Math.floor(minutes / 1_440);
+  const hours = Math.floor((minutes % 1_440) / 60);
+  const remainder = minutes % 60;
+  const remaining = days > 0
+    ? `${days}d${hours > 0 ? ` ${hours}h` : ""}`
+    : hours > 0
+      ? `${hours}h${remainder > 0 ? ` ${remainder}m` : ""}`
+      : `${minutes}m`;
+  return {
+    dateTime: reset.toISOString(),
+    label: reset.toLocaleString(undefined, {
+      weekday: "short", month: "short", day: "numeric", year: "numeric",
+      hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    }),
+    countdown: minutes > 0 ? `in ${remaining}` : "Awaiting usage update",
+  };
+}
+
 // The menu, profile, plugin, and thread surfaces render from other bundles.
 Object.assign(globalThis, {
   codexMuxRequest,
@@ -349,6 +375,7 @@ Object.assign(globalThis, {
   codexMuxFiveHourWindow,
   codexMuxWeeklyWindow,
   codexMuxUsageWindows,
+  codexMuxResetInfo,
 });
 
 async function codexMuxSelectAccount(accountId) {
