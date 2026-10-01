@@ -126,7 +126,8 @@ per-user paths; build them on the machine that runs them.
 ### macOS permissions
 
 **System Settings → Privacy & Security**: grant **Accessibility** to
-*Codex Subscription Router* and **Screen & System Audio Recording** to
+*Codex Subscription Router Computer Use* (and the router if macOS lists it)
+and **Screen & System Audio Recording** to
 *Codex Subscription Router Computer Use* (add it with **+** if the row is
 missing). These are separate rows from the official app's.
 
@@ -159,7 +160,10 @@ connections to an account.
 | Every account depleted | One combined limit notice with the next reset |
 | Account disabled | Excluded from routing and pooled usage |
 
-The thread's subscription appears in its pinned summary. The composer picker
+The thread's subscription appears in its pinned summary. Open **Subscription**
+in the upper-right corner to see its 5-hour and weekly reset dates, local times
+and time zones, and time remaining. Missing reset times are shown as unavailable.
+The composer picker
 can move that chat or save the subscription new chats start on. Account
 switching is handled by the composer; the profile menu manages subscriptions
 and usage.

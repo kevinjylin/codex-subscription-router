@@ -1601,6 +1601,28 @@ def relax_native_pipe_peer_authorization(extracted: Path) -> None:
     main_path.write_text(main, encoding="utf-8")
 
 
+def patch_computer_use_runtime_pipe(main: str, pipe: Path) -> str:
+    """Forward the router socket explicitly to packaged Computer Use runtimes.
+
+    The upstream production MCP configuration otherwise omits the override,
+    leaving callers on the Apple-team group-container default.
+    """
+    pattern = re.compile(
+        r"serviceNativePipePath:(?P<platform>[A-Za-z_$][\w$]*)"
+        r"\.platform===`darwin`&&[A-Za-z_$][\w$]*\?"
+        r"[A-Za-z_$][\w$]*\.default\.env\[[A-Za-z_$][\w$]*\]:null"
+    )
+    if len(pattern.findall(main)) != 1:
+        raise RuntimeError("could not find the Computer Use runtime socket setting")
+    return pattern.sub(
+        lambda match: (
+            f"serviceNativePipePath:{match.group('platform')}.platform===`darwin`?"
+            f"{json.dumps(str(pipe))}:null"
+        ),
+        main,
+    )
+
+
 def patch_desktop_profile(
     extracted: Path, installed_computer_use_app: Path
 ) -> None:
@@ -1667,6 +1689,10 @@ def patch_desktop_profile(
         raise RuntimeError(
             "could not pin the managed Computer Use service to its installed app"
         )
+
+    main = patch_computer_use_runtime_pipe(
+        main, DEFAULT_STATE_ROOT / "computer-use.sock"
+    )
 
     computer_use_instruction = (
         "Control desktop apps on macOS through Computer Use."

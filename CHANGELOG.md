@@ -5,8 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ## [Unreleased]
 
+### Added
+
+- Show the current chat's 5-hour and weekly reset dates, local times and time
+  zones, and countdowns in the upper-right Subscription section.
+
 ### Fixed
 
+- Forward the router's Computer Use socket path to production MCP runtimes;
+  callers no longer connect to the missing Apple-team group-container socket.
 - Authenticate Appshots and Computer Use callers in ad-hoc builds without an
   Apple developer certificate, using local process and executable checks.
 - Read the signing team from a disposable signed executable instead of the
