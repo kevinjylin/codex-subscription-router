@@ -65,10 +65,12 @@ Details: [architecture](docs/ARCHITECTURE.md), [security model](docs/SECURITY-MO
 - macOS on Apple silicon, with the official ChatGPT app at `/Applications/ChatGPT.app`
   — supported builds are listed in [COMPATIBILITY.md](docs/COMPATIBILITY.md)
 - Xcode Command Line Tools, Go 1.26+, Node.js 22.12+ with npm
-- An Apple Development or Developer ID Application identity. Ad-hoc signing
-  (`--allow-adhoc-signing`) works too: the copy then accepts its own
-  unsigned `node_repl` on the owner-only browser and Computer Use pipes, but
-  macOS may not persist Appshots and Computer Use privacy grants.
+- An Apple Development or Developer ID Application identity, or ad-hoc signing
+  (`--allow-adhoc-signing`). Ad-hoc builds support Appshots and Computer Use
+  through local caller authentication: the copied native helper verifies the
+  installing user, expected executable paths, and valid signatures. Screen
+  Recording and Accessibility consent is still required; macOS may require
+  granting it again after an ad-hoc rebuild.
 
 The patcher verifies the official version, build, ASAR hash, and every code
 anchor before changing anything, and refuses unknown builds rather than

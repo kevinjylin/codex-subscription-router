@@ -40,12 +40,12 @@ static bool owner_process(pid_t pid) {
 
 static bool executable_allowed(CFDictionaryRef info, pid_t pid) {
     CFURLRef url = CFDictionaryGetValue(info, kSecCodeInfoMainExecutable);
-    char executable[PATH_MAX], running[PATH_MAX], library[PATH_MAX];
+    char path[PATH_MAX], executable[PATH_MAX], running[PATH_MAX], library[PATH_MAX];
     if (!url || CFGetTypeID(url) != CFURLGetTypeID() ||
-        !CFURLGetFileSystemRepresentation(url, true, (UInt8 *)executable, sizeof(executable)) ||
-        !realpath(executable, executable) ||
-        proc_pidpath(pid, running, sizeof(running)) <= 0 ||
-        !realpath(running, running) || strcmp(executable, running) != 0) return false;
+        !CFURLGetFileSystemRepresentation(url, true, (UInt8 *)path, sizeof(path)) ||
+        !realpath(path, executable) ||
+        proc_pidpath(pid, path, sizeof(path)) <= 0 ||
+        !realpath(path, running) || strcmp(executable, running) != 0) return false;
     Dl_info image;
     if (!dladdr((void *)&executable_allowed, &image) ||
         !realpath(image.dli_fname, library)) return false;
@@ -54,7 +54,7 @@ static bool executable_allowed(CFDictionaryRef info, pid_t pid) {
     library[length - suffix] = '\0';
     /* The helper can be beside the desktop app or embedded inside it. */
     char desktop[PATH_MAX];
-    if (snprintf(desktop, sizeof(desktop), "%s", library) >= sizeof(desktop)) return false;
+    if (snprintf(desktop, sizeof(desktop), "%s", library) >= (int)sizeof(desktop)) return false;
     char *embedded = strstr(desktop, "/Contents/Resources/cua_node/");
     if (embedded) *embedded = '\0';
     else {
@@ -63,7 +63,7 @@ static bool executable_allowed(CFDictionaryRef info, pid_t pid) {
         *slash = '\0';
         size_t used = strlen(desktop);
         if (snprintf(desktop + used, sizeof(desktop) - used, "/%s", ROUTER_APP_NAME) >=
-            sizeof(desktop) - used) return false;
+            (int)(sizeof(desktop) - used)) return false;
     }
     const char *desktop_paths[] = {
         "Contents/MacOS/ChatGPT",
@@ -86,7 +86,7 @@ static bool executable_allowed(CFDictionaryRef info, pid_t pid) {
             sizeof(desktop_paths) / sizeof(*desktop_paths);
         for (size_t i = 0; i < count; i++) {
             char expected[PATH_MAX], canonical[PATH_MAX];
-            if (snprintf(expected, sizeof(expected), "%s/%s", root, paths[i]) >= sizeof(expected)) continue;
+            if (snprintf(expected, sizeof(expected), "%s/%s", root, paths[i]) >= (int)sizeof(expected)) continue;
             if (realpath(expected, canonical) && !strcmp(executable, canonical) &&
                 !stat(executable, &attributes) && attributes.st_uid == ROUTER_OWNER_UID &&
                 !(attributes.st_mode & 0022)) return true;
@@ -175,6 +175,15 @@ static OSStatus local_information(SecStaticCodeRef code, SecCSFlags flags, CFDic
     if (known && actual && CFEqual(known, actual) && owner_process(pid) && executable_allowed(*out, pid)) {
         CFMutableDictionaryRef local = CFDictionaryCreateMutableCopy(NULL, 0, *out);
         CFDictionarySetValue(local, kSecCodeInfoTeamIdentifier, CFSTR(LOCAL_TEAM));
+        /* Electron keeps the upstream executable signing identifier while
+         * its copied bundle and the native production allowlist use ours. */
+        CFURLRef url = CFDictionaryGetValue(local, kSecCodeInfoMainExecutable);
+        char path[PATH_MAX];
+        const char *desktop_suffix = "/Contents/MacOS/ChatGPT";
+        if (CFURLGetFileSystemRepresentation(url, true, (UInt8 *)path, sizeof(path)) &&
+            strlen(path) >= strlen(desktop_suffix) &&
+            !strcmp(path + strlen(path) - strlen(desktop_suffix), desktop_suffix))
+            CFDictionarySetValue(local, kSecCodeInfoIdentifier, CFSTR("app.cdxmux.multi"));
         CFRelease(*out);
         *out = local;
     }

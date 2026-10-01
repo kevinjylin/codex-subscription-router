@@ -42,8 +42,10 @@ jobs:
       - name: Check Python syntax
         run: npm run check:python
 
-      - name: Check native launcher syntax
-        run: xcrun clang -fsyntax-only -Wall -Wextra native/launcher.c
+      - name: Check native source syntax
+        run: |
+          xcrun clang -fsyntax-only -Wall -Wextra -Werror native/launcher.c
+          xcrun clang -fsyntax-only -Wall -Wextra -Werror -DROUTER_OWNER_UID=0 '-DROUTER_APP_NAME="Router.app"' native/local_cua_auth.c
 
       - name: Check installer syntax
         run: npm run check:shell

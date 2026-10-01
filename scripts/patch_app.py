@@ -57,6 +57,8 @@ PREFERRED_SIGNING_IDENTITY_PREFIXES = (
 )
 OPENAI_INTERNAL_TEAM_IDENTIFIER = "HX7739G8FX"
 OPENAI_DISTRIBUTION_TEAM_IDENTIFIER = "2DC432GLL2"
+# An internal helper compatibility marker, never an Apple signing identity.
+LOCAL_CUA_TEAM_IDENTIFIER = "CDXMUX0000"
 
 
 @dataclass(frozen=True)
@@ -156,7 +158,8 @@ def resolve_signing_identity(allow_adhoc: bool) -> str:
                 return identity
     if allow_adhoc:
         print(
-            "Warning: using an ad-hoc signature; Appshots and Computer Use may be unavailable.",
+            "Using ad-hoc signing with local Computer Use caller authentication; "
+            "macOS privacy consent is still required.",
             file=sys.stderr,
         )
         return "-"
@@ -455,10 +458,9 @@ def patch_computer_use_identity(
         with plist_path.open("wb") as handle:
             plistlib.dump(info, handle, fmt=plistlib.FMT_BINARY, sort_keys=False)
 
-        if team_identifier is None:
-            continue
         binary = executable.read_bytes()
-        replacement = arm64_swift_small_string(team_identifier)
+        caller_team = team_identifier or LOCAL_CUA_TEAM_IDENTIFIER
+        replacement = arm64_swift_small_string(caller_team)
         for original_team, description, expected_raw_matches in (
             (OPENAI_INTERNAL_TEAM_IDENTIFIER, "internal", 1),
             (
@@ -478,7 +480,7 @@ def patch_computer_use_identity(
             binary = binary.replace(original, replacement)
 
             raw_original = original_team.encode("ascii")
-            raw_replacement = team_identifier.encode("ascii")
+            raw_replacement = caller_team.encode("ascii")
             raw_match_count = binary.count(raw_original)
             if raw_match_count != expected_raw_matches:
                 raise RuntimeError(
@@ -499,6 +501,82 @@ def patch_computer_use_identity(
                 f"could not find the Computer Use production bundle ID in {relative}"
             )
         executable.write_bytes(binary.replace(original_bundle_id, replacement_bundle_id))
+
+
+def add_local_auth_library(executable: Path, library: str) -> None:
+    """Add one required dylib in existing arm64 Mach-O header padding.
+
+    No section moves or instruction offsets change. Unknown layouts and a
+    previously patched input fail closed before any bytes are written.
+    """
+    data = bytearray(executable.read_bytes())
+    if len(data) < 32 or struct.unpack_from("<II", data) != (0xFEEDFACF, 0x100000C):
+        raise RuntimeError(f"expected a thin arm64 Mach-O: {executable}")
+    count, size = struct.unpack_from("<II", data, 16)
+    end = 32 + size
+    if end > len(data):
+        raise RuntimeError(f"invalid Mach-O load commands: {executable}")
+    offset, first_section = 32, len(data)
+    for _ in range(count):
+        if offset + 8 > end:
+            raise RuntimeError(f"truncated Mach-O load command: {executable}")
+        command, length = struct.unpack_from("<II", data, offset)
+        if length < 8 or length % 8 or offset + length > end:
+            raise RuntimeError(f"invalid Mach-O load command: {executable}")
+        if command == 0x19:  # LC_SEGMENT_64
+            if length < 72:
+                raise RuntimeError(f"truncated Mach-O segment: {executable}")
+            sections = struct.unpack_from("<I", data, offset + 64)[0]
+            if 72 + sections * 80 != length:
+                raise RuntimeError(f"unexpected Mach-O segment size: {executable}")
+            for section in range(sections):
+                start = offset + 72 + section * 80
+                file_offset = struct.unpack_from("<I", data, start + 48)[0]
+                if file_offset:
+                    first_section = min(first_section, file_offset)
+        offset += length
+    if offset != end or library.encode() in data[:end]:
+        raise RuntimeError(f"unexpected or already patched Mach-O header: {executable}")
+    name = library.encode("utf-8") + b"\0"
+    length = (24 + len(name) + 7) & ~7
+    if end + length > first_section or any(data[end : end + length]):
+        raise RuntimeError(f"insufficient zeroed Mach-O header padding: {executable}")
+    data[end : end + length] = struct.pack("<6I", 0xC, length, 24, 0, 0, 0) + name.ljust(length - 24, b"\0")
+    struct.pack_into("<II", data, 16, count + 1, size + length)
+    executable.write_bytes(data)
+
+
+def install_local_cua_auth(
+    app: Path,
+    service_layout: tuple[tuple[str, int], ...],
+) -> None:
+    """Load a same-user, exact-executable adapter in both ends of CUA IPC."""
+    with tempfile.TemporaryDirectory(prefix=".codex-local-cua-auth-") as temporary:
+        library = Path(temporary) / "codex-mux-local-auth.dylib"
+        run([
+            "xcrun", "clang", "-dynamiclib", "-arch", "arm64",
+            "-mmacosx-version-min=14.0", "-O2", "-Wall", "-Wextra", "-Werror",
+            f"-DROUTER_OWNER_UID={os.getuid()}",
+            f"-DROUTER_APP_NAME={json.dumps(app.name)}",
+            "-install_name", "@rpath/codex-mux-local-auth.dylib",
+            str(PROJECT_ROOT / "native" / "local_cua_auth.c"),
+            "-framework", "CoreFoundation", "-framework", "Security", "-lbsm",
+            "-o", str(library),
+        ])
+        for relative, _ in service_layout:
+            service = computer_use_package(app) / relative
+            frameworks = service / "Contents" / "Frameworks"
+            frameworks.mkdir(exist_ok=True)
+            shutil.copyfile(library, frameworks / library.name)
+            add_local_auth_library(
+                service / "Contents" / "MacOS" / "SkyComputerUseService",
+                "@executable_path/../Frameworks/" + library.name,
+            )
+            add_local_auth_library(
+                service / "Contents" / "SharedSupport" / "SkyComputerUseClient.app"
+                / "Contents" / "MacOS" / "SkyComputerUseClient",
+                "@executable_path/../../../../Frameworks/" + library.name,
+            )
 
 
 def patch_asar_computer_use_identity(
@@ -779,6 +857,20 @@ def sign_independent_app(
         expected_cua_replacements,
         service_layout,
     )
+    if identity == "-":
+        install_local_cua_auth(app, service_layout)
+        for relative, _ in service_layout:
+            for caller in (
+                "Contents/MacOS/SkyComputerUseService",
+                "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+            ):
+                key = Path(relative) / caller
+                entitlements = dict(computer_use_entitlements.get(key) or {})
+                # Hardened runtime rejects dylibs without an Apple team even
+                # when both sides are ad-hoc signed. Scope this exception to
+                # the two executables loading our bundled adapter.
+                entitlements["com.apple.security.cs.disable-library-validation"] = True
+                computer_use_entitlements[key] = entitlements
     sign_computer_use_code(app, identity, computer_use_entitlements, service_layout)
     resources = app / "Contents" / "Resources"
     # A re-sealed CLI app no longer matches its profile, so the official binary

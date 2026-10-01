@@ -42,13 +42,30 @@ documented ChatGPT profile and rate-limit APIs.
 ## Signing and native access
 
 The source app is copied into a temporary staging directory. Native modules,
-the Computer Use helper, Node runtime, mux, and final app are signed under one
-selected Apple team and verified before replacement. Official OpenAI
+the Computer Use helper, Node runtime, mux, and final app are signed with the
+selected identity and verified before replacement. Official OpenAI
 application-group and keychain entitlements are removed from modified callers.
 
 The native helper's caller allowlist is patched to the selected team and the
 independent desktop bundle ID. This is required for the helper's peer checks;
 it does not bypass macOS Accessibility or Screen Recording consent.
+
+Ad-hoc builds have no Apple team. Their copied Computer Use service and Apple
+Event client load a bundled identity adapter. It gives the native allowlist an
+internal compatibility marker only for live processes whose real and effective
+user match the installing user, whose executable is at an expected path in the
+router or helper bundle, and whose dynamic code signature is valid. The code
+hash is carried from the kernel-backed process lookup into the signing metadata
+lookup; an unrelated executable or a static-file lookup gets no marker. Bundle
+roots and executables must be owned by the installing user and not writable by
+other users. The marker is not an Apple certificate or macOS entitlement.
+
+The adapter is installed through required Mach-O load commands, with strict
+header-padding checks. Only the two executables loading it receive the hardened
+runtime library-validation exception needed for an ad-hoc dylib. Existing
+native caller rules, app approvals, and macOS privacy consent remain in force.
+The desktop's owner-only pipes accept local peers in ad-hoc mode, consistent
+with the same-user trust boundary above.
 
 ## Diagnostics
 

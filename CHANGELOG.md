@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ### Fixed
 
+- Authenticate Appshots and Computer Use callers in ad-hoc builds without an
+  Apple developer certificate, using local process and executable checks.
 - Read the signing team from a disposable signed executable instead of the
   certificate display name, whose parenthesized value can differ from its team.
 - Merge the stable launcher directory with the newer router. Show five-hour
