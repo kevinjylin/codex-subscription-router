@@ -41,6 +41,15 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /*
+     * Config refreshes inspect the process working directory. Avoid inheriting
+     * a build directory that may later be moved to Trash or deleted.
+     */
+    if (chdir(home) != 0) {
+        perror("Codex Subscription Router launcher: change to home directory");
+        return EXIT_FAILURE;
+    }
+
     char profile[PATH_MAX];
     if (snprintf(profile, sizeof(profile),
                  "--user-data-dir=%s/Library/Application Support/Codex Subscription Router",

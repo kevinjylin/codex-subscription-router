@@ -107,8 +107,8 @@ func (m *Multiplexer) applyRateLimitPreview(snapshot *AccountSnapshot) {
 		return
 	}
 
-	shortDuration := int64(300)
-	weeklyDuration := int64(10_080)
+	shortDuration := fiveHourWindowMinutes
+	weeklyDuration := weeklyWindowMinutes
 	limits := &RateLimits{
 		Primary: &RateLimitWindow{
 			UsedPercent:        100,

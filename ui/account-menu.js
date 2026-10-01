@@ -1,11 +1,16 @@
 function CodexMuxUsageModal({
+  initialAccountId,
   onClose,
 }) {
+  globalThis.__codexMuxRequestedUsageAccountId = initialAccountId || null;
   return (0, e7.jsx)(QLs, {
     defaultResetCreditsOpen: true,
     initialAvailableCount: 0,
     isRateLimitReached: false,
-    onClose,
+    onClose: () => {
+      delete globalThis.__codexMuxRequestedUsageAccountId;
+      onClose?.();
+    },
     onResetComplete: () => {},
   });
 }
@@ -15,7 +20,9 @@ function CodexMuxUseResetAccountState() {
     (account) => account.connected && account.enabled,
   );
   const [accounts, setAccounts] = kXc.useState(cachedAccounts);
-  const [selectedId, setSelectedId] = kXc.useState("primary");
+  const [selectedId, setSelectedId] = kXc.useState(
+    () => globalThis.__codexMuxRequestedUsageAccountId || "primary",
+  );
   const [resetCounts, setResetCounts] = kXc.useState({});
   const [loading, setLoading] = kXc.useState(cachedAccounts.length === 0);
 
@@ -52,6 +59,7 @@ function CodexMuxUseResetAccountState() {
       delete window.__codexMuxResetAccountId;
       delete window.__codexMuxSelectedUsageWindows;
       delete window.__codexMuxResetAccountSelector;
+      delete globalThis.__codexMuxRequestedUsageAccountId;
     },
     [],
   );
@@ -73,7 +81,6 @@ function CodexMuxUseResetAccountState() {
       onSelect: setSelectedId,
     },
   );
-
 }
 
 function CodexMuxResetAccountSelector({
@@ -158,6 +165,7 @@ function CodexMuxAccountMenu() {
     () => !codexMuxCachedAccounts().some((account) => account.connected),
   );
   const [busy, setBusy] = kXc.useState(false);
+  const [selectedAccountId, setSelectedAccountId] = kXc.useState("");
   const [error, setError] = kXc.useState("");
   const [login, setLogin] = kXc.useState(null);
   const [codeCopied, setCodeCopied] = kXc.useState(false);
@@ -174,6 +182,8 @@ function CodexMuxAccountMenu() {
     try {
       const nextAccounts = await codexMuxFetchAccounts();
       setAccounts(nextAccounts);
+      const selection = await codexMuxRequest("/account-selection");
+      setSelectedAccountId(selection.accountId || "");
       setError("");
       if (nextAccounts.some((account) => account.connected)) setLoading(false);
     } catch (requestError) {
@@ -191,7 +201,7 @@ function CodexMuxAccountMenu() {
       ) {
         setLogin(null);
       }
-      if (payload.type === "account-updated") refresh();
+      if (payload.type === "account-updated" || payload.type === "account-selection-changed") refresh();
     });
     const warmupTimer = setTimeout(refresh, 2_000);
     const loadingDeadline = setTimeout(() => {
@@ -219,17 +229,6 @@ function CodexMuxAccountMenu() {
   const connected = accounts.filter(
     (account) => account.connected && account.enabled,
   );
-  const weeklyWindows = connected.map((account) =>
-    codexMuxWeeklyWindow(account.rateLimits),
-  );
-  const hasCompleteUsage =
-    connected.length > 0 && weeklyWindows.every((weekly) => weekly != null);
-  const totalRemaining = weeklyWindows.reduce(
-    (total, weekly) =>
-      total + (weekly == null ? 0 : Math.max(0, 100 - weekly.usedPercent)),
-    0,
-  );
-
   async function addSubscription(event) {
     event.preventDefault();
     if (busy) return;
@@ -303,6 +302,27 @@ function CodexMuxAccountMenu() {
     } catch {}
   }
 
+  async function switchAccount(accountId, event) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await codexMuxSelectAccount(accountId);
+      setSelectedAccountId(result.accountId || "");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function viewAccountUsage(account, event) {
+    event.preventDefault();
+    setExpandedAccountId(null);
+    BW(modalScope, CodexMuxUsageModal, { initialAccountId: account.id });
+  }
+
   async function pairDevice(account, event) {
     event.preventDefault();
     if (pairing?.accountId === account.id && pairing.status === "loading") return;
@@ -357,14 +377,14 @@ function CodexMuxAccountMenu() {
       _H,
       {
         LeftIcon: CodexMuxUsageIcon,
-        SubText: loading ? "Connecting subscriptions…" : undefined,
+        SubText: loading
+          ? "Connecting subscriptions…"
+          : "5-hour and weekly limits by account",
         rightIcon: (0, e7.jsx)("span", {
           className: "text-token-description-foreground tabular-nums",
           children: loading
             ? "…"
-            : hasCompleteUsage
-              ? `${Math.round(totalRemaining)}%`
-              : "–",
+            : `${connected.length} ${connected.length === 1 ? "account" : "accounts"}`,
         }),
         onSelect: () => BW(modalScope, CodexMuxUsageModal, {}),
         children: "Usage remaining",
@@ -379,8 +399,10 @@ function CodexMuxAccountMenu() {
   }
 
   for (const account of connected) {
+    const fiveHour = codexMuxFiveHourWindow(account.rateLimits);
     const weekly = codexMuxWeeklyWindow(account.rateLimits);
-    const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
+    const fiveHourRemaining = codexMuxRemainingPercent(fiveHour);
+    const weeklyRemaining = codexMuxRemainingPercent(weekly);
     rows.push(
       (0, e7.jsx)(
         _H,
@@ -395,14 +417,20 @@ function CodexMuxAccountMenu() {
             ? (0, e7.jsx)(CodexMuxMaskedEmail, { email: account.email })
             : account.planType || "ChatGPT subscription",
           className: "group",
-          rightIcon: (0, e7.jsx)("span", {
-            className: "text-token-description-foreground tabular-nums",
-            children:
-              remaining === 0 && codexMuxCredits(account.rateLimits)
-                ? codexMuxCredits(account.rateLimits)
-                : remaining == null
-                  ? "–"
-                  : `${Math.round(remaining)}%`,
+          rightIcon: (0, e7.jsxs)("span", {
+            className:
+              "flex shrink-0 flex-col items-end text-xs leading-4 text-token-description-foreground tabular-nums",
+            children: [
+              (0, e7.jsx)("span", {
+                children: `5h ${codexMuxPercentLabel(fiveHourRemaining)}`,
+              }),
+              (0, e7.jsx)("span", {
+                children: `Week ${codexMuxPercentLabel(weeklyRemaining)}`,
+              }),
+              codexMuxCredits(account.rateLimits)
+                ? (0, e7.jsx)("span", { children: codexMuxCredits(account.rateLimits) })
+                : null,
+            ],
           }),
           onSelect: (event) => toggleAccount(account, event),
           children: account.planLabel
@@ -413,20 +441,29 @@ function CodexMuxAccountMenu() {
       ),
     );
     if (expandedAccountId === account.id) {
+      rows.push((0, e7.jsx)(_H, {
+        LeftIcon: CodexMuxCopyIcon,
+        SubText: emailCopied ? "Copied" : account.email || "No email on this account",
+        onSelect: (event) => copyEmail(account, event),
+        children: "Copy email address",
+      }, `codex-mux-account-${account.id}-email`));
+      rows.push((0, e7.jsx)(_H, {
+        LeftIcon: CodexMuxSwitchIcon,
+        SubText: "Use for new tasks and next messages this session",
+        disabled: busy || selectedAccountId === account.id,
+        onSelect: (event) => switchAccount(account.id, event),
+        children: selectedAccountId === account.id ? "Selected account" : busy ? "Switching…" : "Switch to account",
+      }, `codex-mux-account-${account.id}-select`));
       rows.push(
         (0, e7.jsx)(
           _H,
           {
-            LeftIcon: CodexMuxCopyIcon,
-            SubText: account.email
-              ? emailCopied
-                ? "Copied"
-                : account.email
-              : "No email on this account",
-            onSelect: (event) => copyEmail(account, event),
-            children: "Copy email address",
+            LeftIcon: CodexMuxSwitchIcon,
+            SubText: account.email || "View this subscription's usage",
+            onSelect: (event) => viewAccountUsage(account, event),
+            children: "View account usage",
           },
-          `codex-mux-account-${account.id}-email`,
+          `codex-mux-account-${account.id}-switch`,
         ),
       );
       if (pairing?.accountId === account.id) {
@@ -467,6 +504,14 @@ function CodexMuxAccountMenu() {
     );
   }
 
+  rows.push((0, e7.jsx)(_H, {
+    LeftIcon: CodexMuxSwitchIcon,
+    SubText: selectedAccountId ? "Clear the account selection" : "Choose accounts based on available usage",
+    disabled: busy || !selectedAccountId,
+    onSelect: (event) => switchAccount("", event),
+    children: selectedAccountId ? "Use automatic routing" : "Automatic routing enabled",
+  }, "codex-mux-automatic-routing"));
+
   if (error) {
     rows.push(
       (0, e7.jsx)(
@@ -477,7 +522,7 @@ function CodexMuxAccountMenu() {
           tone: "danger",
           allowWrap: true,
           subTextAllowWrap: true,
-          children: "Subscription pool unavailable",
+          children: "Account action failed",
         },
         "codex-mux-error",
       ),
@@ -612,6 +657,13 @@ function codexMuxPairingErrorMessage(message) {
   return message;
 }
 
+function codexMuxRemainingPercent(window) {
+  return window == null ? null : Math.max(0, 100 - window.usedPercent);
+}
+
+function codexMuxPercentLabel(value) {
+  return value == null ? "–" : `${Math.round(value)}%`;
+}
 
 // Profile images are kept decoded between menu opens so rows render with
 // their avatars on the first frame instead of after a network round-trip.
@@ -719,6 +771,33 @@ function CodexMuxCopyIcon(props) {
           stroke: "currentColor",
           strokeWidth: 1.5,
           strokeLinecap: "round",
+        }),
+      ],
+    }),
+  });
+}
+
+function CodexMuxSwitchIcon(props) {
+  return (0, e7.jsx)("svg", {
+    viewBox: "0 0 20 20",
+    fill: "none",
+    "aria-hidden": true,
+    ...props,
+    children: (0, e7.jsxs)(e7.Fragment, {
+      children: [
+        (0, e7.jsx)("path", {
+          d: "M3.75 6.5h10.5m0 0-2.75-2.75M14.25 6.5l-2.75 2.75",
+          stroke: "currentColor",
+          strokeWidth: 1.5,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        }),
+        (0, e7.jsx)("path", {
+          d: "M16.25 13.5H5.75m0 0 2.75 2.75M5.75 13.5l2.75-2.75",
+          stroke: "currentColor",
+          strokeWidth: 1.5,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
         }),
       ],
     }),
@@ -955,30 +1034,18 @@ function CodexMuxPluginScope() {
   });
 }
 
-function codexMuxRemainingPercent(account) {
-  const weekly = codexMuxWeeklyWindow(account?.rateLimits);
-  return weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
-}
-
-// codexMuxAccountExhausted reports an account that can take no more turns:
-// its windows are spent and it holds no credits.
+// An exhausted short or weekly window blocks turns unless credits remain.
 function codexMuxAccountExhausted(account) {
-  return (
-    codexMuxRemainingPercent(account) === 0 &&
-    codexMuxCredits(account.rateLimits) == null
-  );
+  return [account.rateLimits?.primary, account.rateLimits?.secondary].some(
+    (window) => window != null && window.usedPercent >= 100,
+  ) && codexMuxCredits(account.rateLimits) == null;
 }
 
 function codexMuxAccountCaption(account) {
-  const remaining = codexMuxRemainingPercent(account);
-  const plan = account.planLabel || "";
-  const usage =
-    remaining == null
-      ? "usage unavailable"
-      : remaining === 0
-        ? (codexMuxCredits(account.rateLimits) ?? "depleted")
-        : `${Math.round(remaining)}% left`;
-  return plan ? `${plan} · ${usage}` : usage;
+  const fiveHour = codexMuxFiveHourWindow(account.rateLimits);
+  const weekly = codexMuxWeeklyWindow(account.rateLimits);
+  const usage = `5h ${codexMuxPercentLabel(codexMuxRemainingPercent(fiveHour))} · Week ${codexMuxPercentLabel(codexMuxRemainingPercent(weekly))}`;
+  return [account.planLabel, usage, codexMuxCredits(account.rateLimits)].filter(Boolean).join(" · ");
 }
 
 // The composer's account control: an avatar beside the model picker showing
@@ -991,6 +1058,7 @@ function CodexMuxComposerAccount() {
   const [accounts, setAccounts] = kXc.useState(codexMuxCachedAccounts);
   const [threadAccountId, setThreadAccountId] = kXc.useState(null);
   const [preferredId, setPreferredId] = kXc.useState(null);
+  const [sessionSelectionId, setSessionSelectionId] = kXc.useState(null);
   const [open, setOpen] = kXc.useState(false);
   const [busy, setBusy] = kXc.useState(false);
   const [error, setError] = kXc.useState("");
@@ -999,9 +1067,10 @@ function CodexMuxComposerAccount() {
 
   const refresh = kXc.useCallback(async () => {
     try {
-      const [nextAccounts, preferred, thread] = await Promise.all([
+      const [nextAccounts, preferred, selection, thread] = await Promise.all([
         codexMuxFetchAccounts(),
         codexMuxRequest("/preferred-account"),
+        codexMuxRequest("/account-selection"),
         threadId
           ? codexMuxRequest(
               `/thread-account?threadId=${encodeURIComponent(threadId)}`,
@@ -1010,6 +1079,7 @@ function CodexMuxComposerAccount() {
       ]);
       setAccounts(nextAccounts);
       setPreferredId(preferred.accountId || null);
+      setSessionSelectionId(selection.accountId || null);
       setThreadAccountId(thread?.account?.id || null);
     } catch {}
   }, [threadId]);
@@ -1022,6 +1092,7 @@ function CodexMuxComposerAccount() {
       if (
         payload.type === "account-updated" ||
         payload.type === "preferred-account-updated" ||
+        payload.type === "account-selection-changed" ||
         payload.type === "thread-routed" ||
         (["thread-moved", "thread-failed-over"].includes(payload.type) &&
           payload.data?.threadId === threadId)
@@ -1062,7 +1133,7 @@ function CodexMuxComposerAccount() {
     (account) => account.connected && account.enabled,
   );
   if (connected.length < 2) return null;
-  const currentId = threadId ? threadAccountId : preferredId;
+  const currentId = threadId ? threadAccountId : sessionSelectionId || preferredId;
   const current = connected.find((account) => account.id === currentId) || null;
 
   function toggle() {
@@ -1095,6 +1166,9 @@ function CodexMuxComposerAccount() {
         });
         setPreferredId(accountId || null);
       }
+      // A direct composer choice supersedes the profile menu's session override.
+      await codexMuxSelectAccount("");
+      setSessionSelectionId(null);
       setOpen(false);
     } catch (requestError) {
       setError(requestError.message);
@@ -1170,7 +1244,7 @@ function CodexMuxComposerAccount() {
                   }),
                   label: "Automatic",
                   caption: "whichever has the most usage left",
-                  active: !preferredId,
+                  active: !currentId,
                   onClick: () => choose(""),
                 }),
             ...connected.map((account) =>

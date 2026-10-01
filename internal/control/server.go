@@ -34,6 +34,7 @@ func New(address, token, root, modelManagerURL string, multiplexer *mux.Multiple
 	router := http.NewServeMux()
 	router.HandleFunc("/v1/health", server.health)
 	router.HandleFunc("/v1/accounts", server.accounts)
+	router.HandleFunc("/v1/account-selection", server.accountSelection)
 	router.HandleFunc("/v1/accounts/", server.accountAction)
 	router.HandleFunc("/v1/thread-account", server.threadAccount)
 	router.HandleFunc("/v1/preferred-account", server.preferredAccount)
@@ -469,4 +470,32 @@ func writeRawJSON(response http.ResponseWriter, status int, value json.RawMessag
 
 func methodNotAllowed(response http.ResponseWriter) {
 	writeJSON(response, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+}
+
+func (s *Server) accountSelection(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+	case http.MethodPost:
+		var input struct {
+			AccountID string `json:"accountId"`
+		}
+		if err := decodeJSON(request, &input); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+		defer cancel()
+		if err := s.mux.SelectAccount(ctx, input.AccountID); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+	default:
+		methodNotAllowed(response)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"accountId": s.mux.SelectedAccount()})
 }
