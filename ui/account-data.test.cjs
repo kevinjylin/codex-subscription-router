@@ -154,7 +154,7 @@ function loadMenu(accounts, { fetch, openModal } = {}) {
   };
 }
 
-test("Switch to account menu action selects routing without opening usage", async () => {
+test("profile account menu keeps management actions without session switching", () => {
   const requests = [];
   const { render } = loadMenu([{ id: "other", label: "Other", enabled: true, connected: true }], {
     fetch: async (url, options) => {
@@ -164,11 +164,12 @@ test("Switch to account menu action selects routing without opening usage", asyn
   });
   const event = { preventDefault() {} };
   render().find((row) => row.key === "codex-mux-account-other").props.onSelect(event);
-  await render().find((row) => row.props.children === "Switch to account").props.onSelect(event);
-  assert.equal(JSON.parse(requests[0].options.body).accountId, "other");
-  assert.ok(render().some((row) => row.props.children === "Selected account"));
-  await render().find((row) => row.props.children === "Use automatic routing").props.onSelect(event);
-  assert.equal(JSON.parse(requests[1].options.body).accountId, "");
+  const rows = render();
+  assert.ok(rows.some((row) => row.props.children === "View account usage"));
+  assert.ok(rows.some((row) => row.props.children === "Copy email address"));
+  assert.ok(!rows.some((row) => row.key === "codex-mux-account-other-select"));
+  assert.ok(!rows.some((row) => row.key === "codex-mux-automatic-routing"));
+  assert.equal(requests.length, 0);
 });
 
 function iconLabels(row) {
@@ -252,7 +253,7 @@ for (const credits of [false, true]) {
 }
 
 
-test("composer choice clears the profile session override after saving its new-chat preference", async () => {
+test("composer choice clears a legacy session override after saving its new-chat preference", async () => {
   const requests = [];
   const accounts = [
     { id: "plus", label: "Plus", enabled: true, connected: true },

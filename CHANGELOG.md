@@ -9,11 +9,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 - Read the signing team from a disposable signed executable instead of the
   certificate display name, whose parenthesized value can differ from its team.
-- Merge manual session account switching and the stable launcher directory
-  with the newer router. Show five-hour and weekly limits for every account
+- Merge the stable launcher directory with the newer router. Show five-hour
+  and weekly limits for every account
   and pool quota windows by duration, including when their slots are swapped.
 - Respect both quota windows when routing while retaining purchased-credit
   support, the composer picker, chat moves, and router updates.
+
+### Removed
+
+- Session account switching and its automatic-routing action in the profile
+  menu. Use the composer account picker to move chats or set the default for
+  new chats; profile account management and usage remain available.
 
 ## [0.6.0] - 2026-10-01
 

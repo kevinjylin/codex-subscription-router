@@ -27,12 +27,10 @@ which is archived.
 - **Sticky threads with failover** — follow-ups stay on their account; a
   depleted owner hands the thread to one with capacity. Only when the whole
   pool is empty does the app show a limit.
-- **Manual account switching** — expand an account in the profile menu and
-  choose **Switch to account**. The selection applies to new tasks and the next
-  message in existing tasks for this app session. A task moves with its history
-  before that message runs; if it cannot safely move, the message fails with an
-  explanation. Exhausted accounts are skipped. Choose **Use automatic routing**
-  to clear the selection; restarting the app also restores automatic routing.
+- **Manual account switching** — use the avatar beside the model picker to
+  move the current chat with its history or save the account new chats start
+  on. The new-chat preference persists across restarts; choose **Automatic**
+  on the new-chat screen to restore quota-aware routing.
 - **Usage across accounts** — the profile menu shows each subscription's
   5-hour and weekly limits, while banners and alerts describe the whole pool.
 - **Native account management** — add subscriptions with device-code sign-in,
@@ -137,9 +135,9 @@ subscription* → finish the device-code sign-in in the browser. The menu shows
 one row per account with its 5-hour and weekly usage.
 
 **Account actions** — each account row shows its 5-hour and weekly usage.
-Select a row to reveal *Switch to account*, *View account usage*,
-*Copy email address*, and *Pair a device…*. Switching selects routing for this
-app session; viewing usage opens the sheet on that subscription. Pairing enables remote control for that
+Select a row to reveal *View account usage*, *Copy email address*, and
+*Pair a device…*. Viewing usage opens the sheet on that subscription.
+Pairing enables remote control for that
 account and shows a short-lived code to enter on the phone or computer
 (selecting it copies). OpenAI requires multi-factor authentication on the
 account; the row says so if it is missing.
@@ -153,16 +151,16 @@ connections to an account.
 
 | Situation | Behaviour |
 | --- | --- |
-| New chat | Assigned by quota at risk, banked resets, short-window pressure |
+| New chat | Uses the saved account preference when available; otherwise assigned by quota at risk, banked resets, short-window pressure |
 | Follow-up, steer, rename | Sent to the thread's account |
 | Owner depleted | Continued on another account with capacity |
 | Every account depleted | One combined limit notice with the next reset |
 | Account disabled | Excluded from routing and pooled usage |
 
 The thread's subscription appears in its pinned summary. The composer picker
-can move that chat or save the subscription new chats start on. A profile-menu
-session selection takes precedence until cleared; choosing in the composer
-clears that override.
+can move that chat or save the subscription new chats start on. Account
+switching is handled by the composer; the profile menu manages subscriptions
+and usage.
 
 ## Updates
 
