@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 
 ### Fixed
 
+- Read the signing team from a disposable signed executable instead of the
+  certificate display name, whose parenthesized value can differ from its team.
 - Merge manual session account switching and the stable launcher directory
   with the newer router. Show five-hour and weekly limits for every account
   and pool quota windows by duration, including when their slots are swapped.

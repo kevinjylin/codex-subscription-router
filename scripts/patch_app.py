@@ -111,7 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-adhoc-signing",
         action="store_true",
-        help="Allow an ad-hoc signature (Appshots and Computer Use may stop working).",
+        help="Allow ad-hoc fallback when no certificate is found; "
+        "set CODEX_MUX_SIGNING_IDENTITY=- to force ad-hoc signing.",
     )
     parser.add_argument(
         "--allow-untested-source",
@@ -168,12 +169,38 @@ def resolve_signing_identity(allow_adhoc: bool) -> str:
 def signing_team_identifier(identity: str) -> str | None:
     if identity == "-":
         return None
-    match = re.search(r"\(([A-Z0-9]{10})\)$", identity)
-    if match is None:
-        raise RuntimeError(
-            "the signing identity must end with its 10-character Apple team ID"
+    # The parenthesized value in an Apple Development certificate's display
+    # name is not guaranteed to be its code-signing team. Sign a disposable
+    # Mach-O and let codesign report the TeamIdentifier it actually applied.
+    with tempfile.TemporaryDirectory(prefix=".codex-signing-team-") as temporary:
+        probe = Path(temporary) / "probe"
+        shutil.copyfile("/usr/bin/true", probe)
+        probe.chmod(0o755)
+        result = subprocess.run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                identity,
+                "--timestamp=none",
+                str(probe),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-    return match.group(1)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                f"could not use signing identity {identity!r}: {details}"
+            )
+        _, team = signed_code_metadata(probe)
+    if team is None:
+        raise RuntimeError(
+            f"signing identity {identity!r} did not produce an Apple team identifier"
+        )
+    return team
 
 
 def signed_code_metadata(path: Path) -> tuple[str | None, str | None]:

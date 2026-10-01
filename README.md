@@ -103,9 +103,20 @@ Useful options:
 | --- | --- |
 | `CODEX_MUX_SIGNING_IDENTITY="Developer ID Application: … (TEAMID)"` | Pick a certificate explicitly |
 | `CODEX_MUX_DISPLAY_NAME="Codex (router)"` | Dock and menu bar name; paths and identifiers are unchanged |
-| `--allow-adhoc-signing` | Build without a certificate |
+| `CODEX_MUX_SIGNING_IDENTITY="-"` | Force ad-hoc signing, even when a certificate is available |
+| `--allow-adhoc-signing` | Allow ad-hoc fallback when no certificate is available |
 | `--force` | Rebuild over an existing install (previous copy goes to `~/.codex-mux/backups`) |
 | `--allow-signing-team-change` | Deliberately rebuild under a different Apple team |
+
+To rebuild without using an Apple development certificate, quit the router and
+its Computer Use helper, then run:
+
+```sh
+CODEX_MUX_SIGNING_IDENTITY=- python3 scripts/patch_app.py --force --allow-adhoc-signing --allow-signing-team-change
+```
+
+The team-change flag allows replacing a certificate-signed install with an
+ad-hoc build.
 
 The build creates `~/Applications/Codex Subscription Router.app`, its Computer
 Use helper, and a desktop profile under
