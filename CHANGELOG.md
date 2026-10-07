@@ -30,6 +30,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
 
+## [0.13.0] - 2026-10-06
+
+### Added
+
+- Compatibility with official ChatGPT build `13232` (26.930.61225),
+  bundling Codex 0.160.1. Builds `13022` and `13100` remain supported;
+  build `12947` is retired.
+
+## [0.12.0] - 2026-10-05
+
+### Added
+
+- Compatibility with official ChatGPT build `13100` (26.930.51102),
+  bundling Codex 0.160.0. Builds `12947` and `13022` remain supported;
+  build `12913` is retired.
+
+## [0.11.0] - 2026-10-04
+
+### Added
+
+- Compatibility with official ChatGPT build `13022` (26.930.41038),
+  bundling Codex 0.160.0. Builds `12913` and `12947` remain supported;
+  build `12776` is retired.
+
+## [0.10.0] - 2026-10-03
+
+### Added
+
+- Compatibility with official ChatGPT builds `12913` (26.930.31428) and
+  `12947` (26.930.31730), both bundling Codex 0.160.0. Build `12776`
+  remains supported; builds `12553` and `12694` are retired.
+
+## [0.8.1] - 2026-10-02
+
+### Changed
+
+- Moved Models and automatic-update controls from the profile menu into
+  Settings > General, using native settings rows, button, and switch.
+  Model management and update status remain available in the new section.
+
+## [0.8.0] - 2026-10-02
+
+### Added
+
+- Compatibility with official ChatGPT builds `12694` (26.928.40906, Codex
+  0.159.2) and `12776` (26.930.21537, Codex 0.159.0-alpha.12.1).
+  Build `12553` remains supported; builds `12246` and `12404` are retired.
+- Staged boot checks target the staged CLI and verify the rendered UI directly.
+
 ## [0.6.0] - 2026-10-01
 
 ### Added
@@ -314,7 +363,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.13.0
+[0.12.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.12.0
+[0.11.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.11.0
+[0.10.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.10.0
+[0.8.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.8.1
+[0.8.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.8.0
 [0.6.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.6.0
 [0.5.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.5.0
 [0.4.4]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.4.4

@@ -41,9 +41,10 @@ python3 scripts/port_renderer.py --source <app> > /tmp/profile.py
 ```
 
 It matches every anchor of the newest profile by shape and prints a ready
-`RENDERER_BUILD_<build>` plus a list of what it could not resolve. Paste the
-profile after the newest one, add it to `RENDERER_BUILDS`, and add the build to
-`SUPPORTED_BUILDS` (hash from step 3). Then fix only what it listed:
+`RENDERER_BUILD_<build>` plus a list of what it could not resolve. Register the
+profile in `RENDERER_BUILDS` and the build in `SUPPORTED_BUILDS` (hash from
+step 3). If the generated profile equals an existing one in every field,
+alias it and register the shared profile once. Fix only what it listed:
 
 - Find the moved code by a string literal or property name from the old
   anchor, and copy the new anchor verbatim from the bundle. Never retype it.
@@ -83,10 +84,10 @@ CODEX_MUX_DISPLAY_NAME="Codex (router)" CODEX_MUX_SIGNING_IDENTITY=- \
 ```
 
 The staged app must boot: `python3 scripts/launch_check.py --app <staged>`
-exits 0 only once the renderer runs and the app-server answers, and prints the
-crash otherwise. Electron hardening (fuses, integrity seals, signing) only
-shows up here. Every entrypoint must launch too: the router, `codex.real` next
-to it, and `codex-cli/bin/codex` print the Codex version. Then run the live
+targets the staged CLI with an isolated desktop profile. It requires a rendered
+UI and an initialized app-server, without a test-server port. Signing and
+Electron hardening only show up here. The router, adjacent `codex.real`, and
+`codex-cli/bin/codex` must each print the Codex version. Then run the live
 move test against the staged `codex.real` (`scripts/live_seed.py` prepares its
 home). After his "go", quit the app, install with
 `patch_app.py --install-staged ~/.codex-mux/port-stage --destination <app>`
@@ -115,5 +116,4 @@ and the updater prunes release sources and older official builds. Leave the
 diff smaller than you found it.
 
 ## Keeping this skill current
-If a step here was wrong, missing, or unnecessary, fix this file in the same
-commit. Replace text rather than appending, and keep it under 120 lines.
+Fix incorrect steps in the same commit; replace text and keep this under 120 lines.
