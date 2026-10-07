@@ -170,6 +170,21 @@ and usage.
 
 ## Updates
 
+To keep committed local customizations while following upstream releases, enable
+the updater with your clean Git checkout:
+
+```sh
+python3 scripts/update.py enable --customizations-source /absolute/path/to/your/fork
+```
+
+Each update merges the upstream release tag into an isolated clone of that
+checkout's configured branch, runs the source checks and exact ChatGPT-build verification, and boots
+the staged app before offering it. Code merge conflicts or failed checks leave
+the installed app unchanged and appear in the update status/log. Changelog-only
+conflicts preserve both sets of notes. Commit local changes before updating;
+the updater never changes your working checkout or pushes to GitHub. Upstream
+build profiles remain authoritative; unknown ChatGPT builds still require a port.
+
 The router updates from this repository's published releases, never from
 OpenAI's updater. Turn it on once:
 
