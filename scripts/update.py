@@ -446,7 +446,7 @@ def main() -> int:
                 return 0
             try:
                 return check(settings)
-            except (OSError, RuntimeError, ValueError) as error:
+            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
                 # A staged build stays ready through a failed check.
                 staged = (ROOT / "stage.json").is_file()
                 set_state("ready" if staged else "failed", f"Update check failed: {error}")
