@@ -50,6 +50,26 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Runtime MCP definitions and plugin caches are mutable and contain
+     * app-specific executable paths. Never share them with the official app.
+     * The primary account's SQLite history remains in its original home. */
+    char runtime_home[PATH_MAX], sqlite_home[PATH_MAX];
+    char codex_path[PATH_MAX], canonical_codex[PATH_MAX];
+    if (snprintf(runtime_home, sizeof(runtime_home), "%s/.codex-mux/desktop-home", home) >=
+            (int)sizeof(runtime_home) ||
+        snprintf(sqlite_home, sizeof(sqlite_home), "%s/.codex", home) >=
+            (int)sizeof(sqlite_home) ||
+        snprintf(codex_path, sizeof(codex_path),
+                 "%s/../Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", directory) >=
+            (int)sizeof(codex_path) ||
+        realpath(codex_path, canonical_codex) == NULL ||
+        setenv("CODEX_HOME", runtime_home, 1) != 0 ||
+        setenv("CODEX_CLI_PATH", canonical_codex, 1) != 0 ||
+        setenv("CODEX_MUX_PRIMARY_SQLITE_HOME", sqlite_home, 1) != 0) {
+        perror("Codex Subscription Router launcher: runtime home");
+        return EXIT_FAILURE;
+    }
+
     char profile[PATH_MAX];
     if (snprintf(profile, sizeof(profile),
                  "--user-data-dir=%s/Library/Application Support/Codex Subscription Router",

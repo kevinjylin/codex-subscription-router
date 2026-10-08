@@ -1,7 +1,9 @@
 """Regressions for certificate selection and actual Apple signing teams."""
 
 import os
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +58,53 @@ class SigningTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not produce an Apple team"):
                 patch_app.signing_team_identifier("certificate")
 
+
+class StagedSigningTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        self.stage = root / "stage"
+        self.destination = root / "installed" / "Router.app"
+        self.destination.mkdir(parents=True)
+        (self.stage / self.destination.name).mkdir(parents=True)
+        (self.stage / patch_app.COMPUTER_USE_APP_NAME).mkdir()
+
+    def install(self, installed_team, staged_team, allow=False):
+        with patch.object(
+            patch_app, "existing_signing_team", side_effect=[installed_team, staged_team]
+        ), patch.object(patch_app, "ensure_components_are_stopped") as stopped, patch.object(
+            patch_app, "install_built"
+        ) as swap, patch.object(Path, "rmdir"):
+            patch_app.install_staged(self.stage, self.destination, allow)
+            stopped.assert_called_once()
+            swap.assert_called_once()
+
+    def test_same_team_update_does_not_need_override(self):
+        self.install("C5467MV9FT", "C5467MV9FT")
+
+    def test_adhoc_to_certificate_is_rejected_before_stopping_apps(self):
+        with patch.object(
+            patch_app, "existing_signing_team", side_effect=[None, "C5467MV9FT"]
+        ), patch.object(patch_app, "ensure_components_are_stopped") as stopped, patch.object(
+            patch_app, "install_built"
+        ) as swap:
+            with self.assertRaisesRegex(RuntimeError, "allow-signing-team-change"):
+                patch_app.install_staged(self.stage, self.destination)
+            stopped.assert_not_called()
+            swap.assert_not_called()
+
+    def test_explicit_team_change_installs_the_prepared_pair(self):
+        self.install(None, "C5467MV9FT", allow=True)
+
+    def test_cli_forwards_explicit_team_change_to_staged_install(self):
+        with patch("sys.argv", ["patch_app.py", "--install-staged", str(self.stage),
+                                "--destination", str(self.destination),
+                                "--allow-signing-team-change"]), patch.object(
+            patch_app, "install_staged"
+        ) as install:
+            self.assertEqual(patch_app.main(), 0)
+            install.assert_called_once_with(self.stage, self.destination, True)
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,9 +22,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from patch_app import stop_lingering_helpers  # noqa: E402
+from patch_app import codex_entrypoint, stop_lingering_helpers  # noqa: E402
+from desktop_home import prepare_desktop_home  # noqa: E402
 
-READY = ("Electron renderer console", "[AppServerConnection] response_routed")
+READY = ("codex-router-renderer-ready", "[AppServerConnection] response_routed")
 
 
 def stop(process: subprocess.Popen[str], app: Path) -> None:
@@ -48,13 +49,24 @@ def main() -> int:
     args = parser.parse_args()
 
     app = args.app.expanduser().resolve()
+    primary_home = Path.home() / ".codex"
+    runtime_home = Path.home() / ".codex-mux" / "desktop-home"
+    prepare_desktop_home(primary_home, runtime_home)
     executable = app / "Contents" / "MacOS" / "ChatGPT"
     with tempfile.TemporaryDirectory(prefix="codex-router-launch-") as profile:
         log_path = Path(profile) / "launch.log"
         with log_path.open("w") as log:
             process = subprocess.Popen(
                 [str(executable), f"--user-data-dir={profile}/user-data"],
-                env={**os.environ, "ELECTRON_ENABLE_LOGGING": "1"},
+                env={
+                    **os.environ,
+                    "ELECTRON_ENABLE_LOGGING": "1",
+                    "CODEX_CLI_PATH": str(codex_entrypoint(app / "Contents" / "Resources")),
+                    "CODEX_MUX_UI_TESTS": "1",
+                    "CODEX_MUX_LAUNCH_CHECK": "1",
+                    "CODEX_HOME": str(runtime_home),
+                    "CODEX_MUX_PRIMARY_SQLITE_HOME": str(primary_home),
+                },
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -66,6 +78,9 @@ def main() -> int:
             while time.monotonic() < deadline and process.poll() is None:
                 output = log_path.read_text(errors="replace")
                 seen = {marker for marker in READY if marker in output}
+                if any("initialize_handshake_result" in line and "outcome=success" in line
+                       for line in output.splitlines()):
+                    seen.add(READY[1])
                 if len(seen) == len(READY) or "FATAL:" in output:
                     break
                 time.sleep(1)

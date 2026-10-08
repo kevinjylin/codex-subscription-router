@@ -99,6 +99,19 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 	default:
 		return nil, fmt.Errorf("read state: %w", err)
 	}
+
+	// The controller follows the desktop's runtime home. Account IDs and
+	// thread ownership stay stable when runtime configuration is isolated.
+	for i := range store.accounts {
+		account := &store.accounts[i]
+		if account.ID == "primary" && account.Controller && account.CodexHome != primaryCodexHome {
+			account.CodexHome = primaryCodexHome
+			if err := store.saveLocked(); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
 	for _, account := range store.accounts {
 		if !store.isolatedHome(account.CodexHome) {
 			continue

@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,7 @@ LOG = STATE_ROOT / "logs" / "update.log"
 AGENT = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 DEFAULT_APP = Path.home() / "Applications" / "Codex Subscription Router.app"
 HEADERS = {"User-Agent": "codex-subscription-router/update"}
+MERGED = ROOT / "merged"
 
 
 def read_json(path: Path) -> dict | None:
@@ -124,6 +126,71 @@ def fetch_release(version: str, tarball: str) -> Path:
     return target
 
 
+def git_output(source: Path, *arguments: str) -> str:
+    return subprocess.check_output(
+        ["git", "-c", "core.hooksPath=/dev/null", "-C", str(source), *arguments],
+        text=True,
+    ).strip()
+
+
+def customization_revision(source: Path, ref: str = "HEAD") -> str:
+    if git_output(source, "status", "--porcelain"):
+        raise RuntimeError("Customizations checkout has uncommitted changes; commit them before updating")
+    return git_output(source, "rev-parse", "--verify", f"{ref}^{{commit}}")
+
+
+def merge_release(source: Path, revision: str, version: str, repository: str) -> Path:
+    """Merge in an isolated clone; conflicts never change the user's checkout or app."""
+    target = MERGED / f"v{version}-{revision}"
+    if (target / ".customizations-ready.json").is_file():
+        return target
+    MERGED.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=MERGED) as scratch:
+        combined = Path(scratch) / "source"
+        run(["git", "clone", "--no-hardlinks", "--no-checkout", str(source), str(combined)])
+        run(["git", "-C", str(combined), "checkout", "--detach", revision])
+        run(["git", "-C", str(combined), "fetch", "--no-tags", repository, f"refs/tags/v{version}"])
+        try:
+            run([
+                "git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                "-c", "merge.conflictStyle=merge",
+                "-c", "user.name=Codex local updater", "-c", "user.email=codex-local@localhost",
+                "-C", str(combined), "merge", "--no-edit", "--no-ff", "FETCH_HEAD",
+            ])
+        except subprocess.CalledProcessError as error:
+            conflicts = git_output(combined, "diff", "--name-only", "--diff-filter=U")
+            if conflicts == "CHANGELOG.md":
+                # Both projects prepend release notes. Keep both sides of that
+                # documentation-only conflict, without resolving code conflicts.
+                changelog = combined / "CHANGELOG.md"
+                text, count = re.subn(
+                    r"(?m)^<<<<<<<[^\n]*\n(.*?)^=======\n(.*?)^>>>>>>>[^\n]*\n",
+                    lambda match: match[1].rstrip() + "\n\n" + match[2],
+                    changelog.read_text(), flags=re.DOTALL,
+                )
+                if count == 0 or any(marker in text for marker in ["<<<<<<<", "=======", ">>>>>>>"]):
+                    raise RuntimeError("Unrecognized changelog merge; installed app unchanged") from error
+                changelog.write_text(text)
+                run(["git", "-C", str(combined), "add", "CHANGELOG.md"])
+                run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                     "-c", "user.name=Codex local updater", "-c", "user.email=codex-local@localhost",
+                     "-C", str(combined), "commit", "--no-edit"])
+            else:
+                raise RuntimeError(
+                    f"Upstream v{version} could not merge with your customizations; "
+                    f"installed app unchanged. Conflicts: {conflicts or 'see update log'}"
+                ) from error
+        if (combined / "VERSION").read_text().strip() != version:
+            raise RuntimeError("Merged source does not match the upstream release version")
+        write_json(combined / ".customizations-ready.json", {
+            "customizationsRevision": revision,
+            "upstreamRevision": git_output(combined, "rev-parse", "FETCH_HEAD"),
+            "mergedRevision": git_output(combined, "rev-parse", "HEAD"),
+        })
+        combined.rename(target)
+    return target
+
+
 def choose_build(source: Path) -> tuple[str, str | None]:
     """The newest official build the release supports that is here or offered."""
     supported = {build for _, build in load_module(source, "patch_app").SUPPORTED_BUILDS}
@@ -140,12 +207,16 @@ def discard_stage() -> None:
     (ROOT / "stage.json").unlink(missing_ok=True)
 
 
-def build_stage(source: Path, app: Path, version: str, build: str, url: str | None) -> None:
+def build_stage(source: Path, app: Path, version: str, build: str, url: str | None,
+                customizations_revision: str | None = None) -> None:
     official = SOURCES / f"ChatGPT-{build}.app"
     if not official.is_dir():
         load_module(source, "appcast").fetch(url, build, SOURCES)
     if not (source / "node_modules" / "@electron" / "asar").is_dir():
         run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=source)
+    if customizations_revision is not None:
+        run(["npm", "run", "check"], cwd=source)
+        run([sys.executable, "scripts/verify_build.py", "--source", str(official)], cwd=source)
     info = installed(app)
     env = {**os.environ, "CODEX_MUX_DISPLAY_NAME": info["CFBundleName"]}
     command = [
@@ -159,7 +230,8 @@ def build_stage(source: Path, app: Path, version: str, build: str, url: str | No
     run([sys.executable, "scripts/launch_check.py", "--app", str(STAGE / app.name)], cwd=source)
     write_json(
         ROOT / "stage.json",
-        {"version": version, "build": build, "source": str(source)},
+        {"version": version, "build": build, "source": str(source),
+         "customizationsRevision": customizations_revision},
     )
 
 
@@ -168,11 +240,18 @@ def check(settings: dict) -> int:
     info = installed(app)
     current = (info.get("CodexMuxVersion", "0.0.0"), info["CFBundleVersion"])
     version, tarball = latest_release()
+    custom_source = settings.get("customizations_source")
+    revision = customization_revision(Path(custom_source), settings.get("customizations_ref", "HEAD")) if custom_source else None
+    custom_changed = revision is not None and revision != settings.get("installed_customizations_revision")
     newer = version_key(version, "0") >= version_key(current[0], "0")
     if newer:
-        source = fetch_release(version, tarball)
+        source = (
+            merge_release(Path(custom_source), revision, version,
+                          f"https://github.com/{REPOSITORY}.git")
+            if revision is not None else fetch_release(version, tarball)
+        )
         build, url = choose_build(source)
-        newer = version_key(version, build) > version_key(*current)
+        newer = version_key(version, build) > version_key(*current) or custom_changed
     if not newer:
         discard_stage()
         set_state("up-to-date", installed=describe(*current), available=None)
@@ -181,13 +260,13 @@ def check(settings: dict) -> int:
     target = describe(version, build)
     fields = {"installed": describe(*current), "available": target}
     stage = read_json(ROOT / "stage.json") or {}
-    if (stage.get("version"), stage.get("build")) != (version, build) or not (
+    if (stage.get("version"), stage.get("build"), stage.get("customizationsRevision")) != (version, build, revision) or not (
         STAGE / app.name
     ).is_dir():
         discard_stage()
         set_state("building", f"Preparing {target}", **fields)
         try:
-            build_stage(source, app, version, build, url)
+            build_stage(source, app, version, build, url, revision)
         except (subprocess.CalledProcessError, OSError, RuntimeError) as error:
             discard_stage()
             set_state("failed", f"Preparing {target} failed: {error}", **fields)
@@ -246,6 +325,9 @@ def install_stage(app: Path) -> int:
         set_state("ready", f"Installing {target} failed; see {LOG}")
         return 1
     shutil.copy2(source / "scripts" / "update.py", ROOT / "update.py")
+    settings = read_json(ROOT / "settings.json") or {}
+    settings["installed_customizations_revision"] = stage.get("customizationsRevision")
+    write_json(ROOT / "settings.json", settings)
     (ROOT / "stage.json").unlink()
     set_state("up-to-date", installed=target, available=None)
     collect_garbage(app)
@@ -279,7 +361,7 @@ def launchctl(*arguments: str) -> subprocess.CompletedProcess:
     return subprocess.run(["launchctl", *arguments], capture_output=True, text=True)
 
 
-def enable(app: Path) -> int:
+def enable(app: Path, customizations_source: Path | None = None) -> int:
     app = app.expanduser().resolve()
     installed(app)
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -287,6 +369,11 @@ def enable(app: Path) -> int:
     # The PATH entry survives interpreter upgrades; sys.executable names a version.
     python = shutil.which("python3") or sys.executable
     settings = read_json(ROOT / "settings.json") or {"auto": False}
+    if customizations_source is not None:
+        customizations_source = customizations_source.expanduser().resolve()
+        customization_revision(customizations_source)
+        settings["customizations_source"] = str(customizations_source)
+        settings["customizations_ref"] = git_output(customizations_source, "symbolic-ref", "--short", "HEAD")
     settings.update(app=str(app), python=python)
     write_json(ROOT / "settings.json", settings)
     if Path(__file__).resolve() != (ROOT / "update.py").resolve():
@@ -330,6 +417,8 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     enable_parser = commands.add_parser("enable")
     enable_parser.add_argument("--app", type=Path, default=DEFAULT_APP)
+    enable_parser.add_argument("--customizations-source", type=Path,
+                               help="Merge upstream releases with this clean, committed local Git checkout")
     commands.add_parser("check")
     apply_parser = commands.add_parser("apply")
     apply_parser.add_argument("--relaunch", action="store_true")
@@ -339,7 +428,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "enable":
-        return enable(args.app)
+        return enable(args.app, args.customizations_source)
     if args.command == "disable":
         return disable()
     if args.command == "status":
@@ -357,7 +446,7 @@ def main() -> int:
                 return 0
             try:
                 return check(settings)
-            except (OSError, RuntimeError, ValueError) as error:
+            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
                 # A staged build stays ready through a failed check.
                 staged = (ROOT / "stage.json").is_file()
                 set_state("ready" if staged else "failed", f"Update check failed: {error}")
