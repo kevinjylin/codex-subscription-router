@@ -30,6 +30,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
 
+## [0.14.0] - 2026-10-07
+
+### Added
+
+- Compatibility with official ChatGPT builds `13536` (26.1002.52244,
+  Codex 0.162.0-alpha.2) and `13520` (26.930.61225, Codex 0.160.1).
+  Build `13232` remains supported; builds `13022` and `13100` are retired.
+
 ## [0.13.0] - 2026-10-06
 
 ### Added
@@ -363,7 +371,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.14.0
 [0.13.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.13.0
 [0.12.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.12.0
 [0.11.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.11.0
