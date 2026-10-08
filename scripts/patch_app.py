@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from desktop_home import prepare_desktop_home
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_VERSION = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -1927,7 +1929,9 @@ def patch_app(
         )
 
 
-def install_staged(stage: Path, destination: Path) -> None:
+def install_staged(
+    stage: Path, destination: Path, allow_signing_team_change: bool = False
+) -> None:
     """Swap in a pair --stage built for this destination; the app must be quit."""
     stage = stage.expanduser().resolve()
     destination = destination.expanduser().resolve()
@@ -1936,10 +1940,15 @@ def install_staged(stage: Path, destination: Path) -> None:
     installed_computer_use_app = destination.parent / COMPUTER_USE_APP_NAME
     if not staged_app.is_dir() or not staged_computer_use_app.is_dir():
         raise RuntimeError(f"no staged build for {destination.name} in {stage}")
-    if destination.exists() and existing_signing_team(destination) != existing_signing_team(
-        staged_app
+    if (
+        destination.exists()
+        and existing_signing_team(destination) != existing_signing_team(staged_app)
+        and not allow_signing_team_change
     ):
-        raise RuntimeError("the staged build is signed by a different team than the installed one")
+        raise RuntimeError(
+            "the staged build is signed by a different team than the installed one; "
+            "reuse the prior identity or pass --allow-signing-team-change"
+        )
     ensure_components_are_stopped((destination, installed_computer_use_app))
     install_built(
         staged_app,
@@ -1964,6 +1973,7 @@ def install_built(
     helper_backup = backup_directory / installed_computer_use_app.name
     had_app = destination.exists()
     had_helper = installed_computer_use_app.exists()
+    prepare_desktop_home(Path.home() / ".codex", DEFAULT_STATE_ROOT / "desktop-home")
     if had_app or had_helper:
         prune_backups(DEFAULT_STATE_ROOT / "backups", keep=0)
         backup_directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2014,7 +2024,9 @@ def main() -> int:
     args = parse_args()
     try:
         if args.install_staged:
-            install_staged(args.install_staged, args.destination)
+            install_staged(
+                args.install_staged, args.destination, args.allow_signing_team_change
+            )
             return 0
         patch_app(
             args.source,

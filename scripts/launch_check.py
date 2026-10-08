@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from patch_app import codex_entrypoint, stop_lingering_helpers  # noqa: E402
+from desktop_home import prepare_desktop_home  # noqa: E402
 
 READY = ("codex-router-renderer-ready", "[AppServerConnection] response_routed")
 
@@ -48,6 +49,9 @@ def main() -> int:
     args = parser.parse_args()
 
     app = args.app.expanduser().resolve()
+    primary_home = Path.home() / ".codex"
+    runtime_home = Path.home() / ".codex-mux" / "desktop-home"
+    prepare_desktop_home(primary_home, runtime_home)
     executable = app / "Contents" / "MacOS" / "ChatGPT"
     with tempfile.TemporaryDirectory(prefix="codex-router-launch-") as profile:
         log_path = Path(profile) / "launch.log"
@@ -60,6 +64,8 @@ def main() -> int:
                     "CODEX_CLI_PATH": str(codex_entrypoint(app / "Contents" / "Resources")),
                     "CODEX_MUX_UI_TESTS": "1",
                     "CODEX_MUX_LAUNCH_CHECK": "1",
+                    "CODEX_HOME": str(runtime_home),
+                    "CODEX_MUX_PRIMARY_SQLITE_HOME": str(primary_home),
                 },
                 stdout=log,
                 stderr=subprocess.STDOUT,

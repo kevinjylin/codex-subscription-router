@@ -131,6 +131,13 @@ and **Screen & System Audio Recording** to
 *Codex Subscription Router Computer Use* (add it with **+** if the row is
 missing). These are separate rows from the official app's.
 
+Ad-hoc signatures identify a particular code hash, so rebuilding the helper
+can invalidate those grants. To keep the helper's identity across updates,
+reuse a valid Apple Development or Developer ID Application certificate with
+the same signing team. Switching from ad-hoc signing to a certificate requires
+`--allow-signing-team-change` and granting the helper permissions once under
+its new identity; that flag also applies to `--install-staged`.
+
 ## Use
 
 **Add a subscription** — profile menu (bottom of the sidebar) → *Add another
@@ -212,7 +219,8 @@ outside the bundle and are untouched.
 
 | Path | Purpose |
 | --- | --- |
-| `~/.codex` | Primary account (shared with the official app) |
+| `~/.codex` | Primary account credentials and history, shared with the official app |
+| `~/.codex-mux/desktop-home` | Router-only runtime config and plugin cache; primary history remains shared |
 | `~/.codex-mux/accounts/<id>/codex-home` | Isolated secondary accounts |
 | `~/.codex-mux/state.json` | Accounts and thread ownership |
 | `~/.codex-mux/control-token` | Token for the loopback-only control API |
@@ -221,8 +229,12 @@ outside the bundle and are untouched.
 | `~/Library/Application Support/Codex Subscription Router` | Desktop profile |
 
 The control API binds to `127.0.0.1` only and never returns OAuth tokens.
+The router seeds its runtime config from the Primary home once and keeps its
+mutable MCP definitions and plugin cache separate from the official app. This
+prevents either app from replacing the other's browser and Computer Use runtime
+paths. Primary credentials, history, and personal instructions remain shared.
 Managed config (MCP servers, plugins, project trust) is synchronized from the
-Primary home to each account home, and `AGENTS.md`, `agents/`, `hooks.json`,
+router runtime home to each account home, and `AGENTS.md`, `agents/`, `hooks.json`,
 and `skills/` are linked to the Primary copies; credentials are not shared. Account homes are
 therefore not a secret boundary for inline MCP secrets.
 

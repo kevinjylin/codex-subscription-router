@@ -46,6 +46,29 @@ func TestStoreBootstrapsPrimaryAndPersistsThreadAffinity(t *testing.T) {
 	}
 }
 
+func TestPrimaryRuntimeHomeMigrationPreservesThreadOwnership(t *testing.T) {
+	root := t.TempDir()
+	muxRoot := filepath.Join(root, "mux")
+	store, err := Open(muxRoot, filepath.Join(root, "official"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetThreadOwner("existing-thread", "primary"); err != nil {
+		t.Fatal(err)
+	}
+	runtimeHome := filepath.Join(root, "router")
+	reopened, err := Open(muxRoot, runtimeHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Accounts()[0].CodexHome; got != runtimeHome {
+		t.Fatalf("primary still uses the shared runtime home: %q", got)
+	}
+	if owner, ok := reopened.ThreadOwner("existing-thread"); !ok || owner != "primary" {
+		t.Fatalf("thread ownership changed: %q %v", owner, ok)
+	}
+}
+
 func TestAccountConfigInheritsManagedMCPAndProjectTrust(t *testing.T) {
 	root := t.TempDir()
 	primaryHome := filepath.Join(root, "primary")

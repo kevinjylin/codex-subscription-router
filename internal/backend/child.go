@@ -48,7 +48,7 @@ type Child struct {
 
 func Start(accountID, codexHome, executable string, args, baseEnv []string, inbound chan<- Inbound) (*Child, error) {
 	env := withEnvironment(baseEnv, "CODEX_HOME", codexHome)
-	env = withEnvironment(env, "CODEX_SQLITE_HOME", codexHome)
+	env = withEnvironment(env, "CODEX_SQLITE_HOME", sqliteHome(accountID, codexHome, baseEnv))
 	command := exec.Command(executable, args...)
 	command.Env = env
 	stdin, err := command.StdinPipe()
@@ -78,6 +78,18 @@ func Start(accountID, codexHome, executable string, args, baseEnv []string, inbo
 	go child.readLoop(stdout)
 	go child.waitLoop()
 	return child, nil
+}
+
+func sqliteHome(accountID, codexHome string, baseEnv []string) string {
+	if accountID == "primary" {
+		const prefix = "CODEX_MUX_PRIMARY_SQLITE_HOME="
+		for _, value := range baseEnv {
+			if strings.HasPrefix(value, prefix) && len(value) > len(prefix) {
+				return strings.TrimPrefix(value, prefix)
+			}
+		}
+	}
+	return codexHome
 }
 
 func (c *Child) Send(message protocol.Message) error {
