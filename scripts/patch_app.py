@@ -368,6 +368,38 @@ def replace_same_length_identifier(
     return count
 
 
+def patch_native_pipe_signing_team(
+    app: Path, identity: str, team_identifier: str
+) -> None:
+    """Trust the same signing team as this app without changing peer checks."""
+    if re.fullmatch(r"[A-Z0-9]{10}", team_identifier) is None:
+        raise RuntimeError("native pipe requires a ten-character Apple signing team")
+    module = app / "Contents/Resources/native/browser-use-peer-authorization.node"
+    # Strip the old signature so certificate bytes cannot match the code constant.
+    run(["codesign", "--remove-signature", str(module)])
+
+    def team_instructions(team: str) -> bytes:
+        # arm64 also inlines the ten-byte comparison into x13 and w14.
+        encoded = team.encode("ascii")
+        words = [int.from_bytes(encoded[i:i + 2], "little") for i in range(0, 10, 2)]
+        opcodes = (0xD280000D, 0xF2A0000D, 0xF2C0000D, 0xF2E0000D, 0x5280000E)
+        return b"".join(
+            (opcode | word << 5).to_bytes(4, "little")
+            for opcode, word in zip(opcodes, words)
+        )
+
+    original = OPENAI_DISTRIBUTION_TEAM_IDENTIFIER.encode("ascii")
+    original_instructions = team_instructions(OPENAI_DISTRIBUTION_TEAM_IDENTIFIER)
+    data = module.read_bytes()
+    if data.count(original) != 1 or data.count(original_instructions) != 1:
+        raise RuntimeError("expected exactly one native pipe signing team constant and comparison")
+    module.write_bytes(data.replace(original, team_identifier.encode("ascii")).replace(
+        original_instructions, team_instructions(team_identifier)
+    ))
+    sign_runtime_executable(module, identity, entitlements=None)
+    run(["codesign", "--verify", "--strict", str(module)])
+
+
 def computer_use_package(app: Path) -> Path:
     return (
         app
@@ -874,6 +906,8 @@ def sign_independent_app(
                 entitlements["com.apple.security.cs.disable-library-validation"] = True
                 computer_use_entitlements[key] = entitlements
     sign_computer_use_code(app, identity, computer_use_entitlements, service_layout)
+    if team_identifier is not None:
+        patch_native_pipe_signing_team(app, identity, team_identifier)
     resources = app / "Contents" / "Resources"
     # A re-sealed CLI app no longer matches its profile, so the official binary
     # keeps only the runtime entitlements it needs to run.

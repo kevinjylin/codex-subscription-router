@@ -59,6 +59,47 @@ class SigningTests(unittest.TestCase):
                 patch_app.signing_team_identifier("certificate")
 
 
+class NativePipeSigningTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.app = Path(scratch.name) / "Router.app"
+        self.module = self.app / "Contents/Resources/native/browser-use-peer-authorization.node"
+        self.module.parent.mkdir(parents=True)
+
+    def test_only_the_team_changes_and_the_module_is_resigned(self):
+        original_code = bytes.fromhex("4d8688d26d88a6f26d46c6f2ed88e9f28e498652")
+        replacement_code = bytes.fromhex("6da886d28dc6a6f2eda6c9f2cd2ae7f2ce888a52")
+        data = b"ancestry-check\0" + b"2DC432GLL2" + original_code + b"\0identifier-check"
+        self.module.write_bytes(data)
+        with patch.object(patch_app, "run") as run, patch.object(
+            patch_app, "sign_runtime_executable"
+        ) as sign:
+            patch_app.patch_native_pipe_signing_team(self.app, "certificate", "C5467MV9FT")
+            self.assertEqual(self.module.read_bytes(), data.replace(b"2DC432GLL2", b"C5467MV9FT").replace(original_code, replacement_code))
+            sign.assert_called_once_with(self.module, "certificate", entitlements=None)
+            self.assertEqual(run.call_args_list[0].args[0][1], "--remove-signature")
+            self.assertEqual(run.call_args_list[-1].args[0][1:3], ["--verify", "--strict"])
+
+    def test_changed_binary_layout_fails_before_patching_or_signing(self):
+        for data in (b"no-team", b"2DC432GLL2", b"2DC432GLL2\0duplicate\0" + b"2DC432GLL2"):
+            with self.subTest(data=data):
+                self.module.write_bytes(data)
+                with patch.object(patch_app, "run"), patch.object(
+                    patch_app, "sign_runtime_executable"
+                ) as sign:
+                    with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                        patch_app.patch_native_pipe_signing_team(self.app, "certificate", "C5467MV9FT")
+                    self.assertEqual(self.module.read_bytes(), data)
+                    sign.assert_not_called()
+
+    def test_invalid_team_leaves_the_module_untouched(self):
+        with patch.object(patch_app, "run") as run:
+            with self.assertRaisesRegex(RuntimeError, "ten-character"):
+                patch_app.patch_native_pipe_signing_team(self.app, "certificate", "invalid")
+            run.assert_not_called()
+
+
 class StagedSigningTests(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
