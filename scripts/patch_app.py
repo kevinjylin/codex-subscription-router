@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from desktop_home import prepare_desktop_home
+from chrome_bridge import build_bridge, register_bridge
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -908,6 +909,10 @@ def sign_independent_app(
     sign_computer_use_code(app, identity, computer_use_entitlements, service_layout)
     if team_identifier is not None:
         patch_native_pipe_signing_team(app, identity, team_identifier)
+        bridge = build_bridge(app, team_identifier)
+        if bridge is not None:
+            sign_runtime_executable(bridge, identity, entitlements=None)
+            run(["codesign", "--verify", "--strict", str(bridge)])
     resources = app / "Contents" / "Resources"
     # A re-sealed CLI app no longer matches its profile, so the official binary
     # keeps only the runtime entitlements it needs to run.
@@ -2048,6 +2053,7 @@ def install_built(
                 str(installed_computer_use_app),
             ]
         )
+    register_bridge(destination, Path.home())
     retire_stale_cached_computer_use_app()
 
     print(destination)
