@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 
 
-PRIVATE_ENTRIES = {"config.toml", "plugins", ".tmp", "tmp", "node_repl", "computer-use", "browser", "visualizations"}
+PRIVATE_ENTRIES = {"config.toml", "plugins", ".tmp", "tmp", "node_repl", "computer-use", "browser", "visualizations", "chrome-native-hosts-v2.json"}
 RUNTIME_SERVERS = {"node_repl", "computer-use", "cua_repl"}
 
 
@@ -89,6 +89,12 @@ def prepare_desktop_home(source: Path, target: Path) -> None:
         raise RuntimeError("desktop runtime home must be separate from the official home")
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
     target.chmod(0o700)
+    # This is executable-path metadata, not shared conversation history. Drop
+    # only a legacy link to the primary registry; desktop reconciliation will
+    # create a fresh private registry without modifying the official one.
+    registry = target / "chrome-native-hosts-v2.json"
+    if registry.is_symlink() and registry.resolve() == source / registry.name:
+        registry.unlink()
     # The browser sandbox requires writable roots without symlink components.
     visualizations = target / "visualizations"
     if visualizations.is_symlink():

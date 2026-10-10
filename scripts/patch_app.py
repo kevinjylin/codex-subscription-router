@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from desktop_home import prepare_desktop_home
-from chrome_bridge import build_bridge, register_bridge
+from chrome_bridge import build_bridge, register_bridge, patch_runtime
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1567,7 +1567,7 @@ def patch_computer_use_runtime_pipe(main: str, pipe: Path) -> str:
 
 
 def patch_desktop_profile(
-    extracted: Path, installed_computer_use_app: Path
+    extracted: Path, installed_computer_use_app: Path, *, chrome_bridge_enabled: bool = False
 ) -> None:
     """Give the copied Electron app its own user-data and single-instance scope."""
     bootstrap_files = list((extracted / ".vite" / "build").glob("bootstrap-*.js"))
@@ -1605,6 +1605,9 @@ def patch_desktop_profile(
 
     # Updates come from the router's own releases, never an unpatched official build.
     bootstrap = attach_router_updater(bootstrap)
+    if chrome_bridge_enabled:
+        bootstrap = patch_runtime(bootstrap)
+        shutil.copy2(PROJECT_ROOT / "ui" / "chrome-bridge.cjs", bootstrap_path.parent / "chrome-bridge.cjs")
     bootstrap_path.write_text(bootstrap, encoding="utf-8")
     disable_updater_lifecycle(extracted)
 
@@ -1866,7 +1869,9 @@ def patch_app(
         patch_asar_computer_use_identity(
             extracted, source_spec.asar_cua_identifier_replacements
         )
-        patch_desktop_profile(extracted, installed_computer_use_app)
+        patch_desktop_profile(extracted, installed_computer_use_app, chrome_bridge_enabled=(
+            team_identifier is not None and (resources / "plugin-signatures/openai-bundled/chrome/plugin.tar.gz").is_file()
+        ))
         if signing_identity == "-":
             relax_native_pipe_peer_authorization(extracted)
         patch_renderer(extracted, token)

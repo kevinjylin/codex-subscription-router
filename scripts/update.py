@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import importlib.util
+import hashlib
 import json
 import os
 import plistlib
@@ -88,13 +89,30 @@ def run(command: list[str], cwd: Path | None = None, env: dict | None = None) ->
 
 
 def load_module(source: Path, name: str):
-    """A script of the given release source, imported under its own name."""
+    """Load sibling imports from this release, without leaking across releases."""
+    scripts = (source / "scripts").resolve()
+    siblings = {path.stem for path in scripts.glob("*.py")}
+    saved = {key: sys.modules[key] for key in siblings if key in sys.modules}
+    search_path = sys.path[:]
+    key = hashlib.sha256(str(scripts).encode()).hexdigest()[:16]
     spec = importlib.util.spec_from_file_location(
-        f"release_{name}", source / "scripts" / f"{name}.py"
+        f"release_{key}_{name}", scripts / f"{name}.py"
     )
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        for sibling in siblings:
+            sys.modules.pop(sibling, None)
+        sys.path.insert(0, str(scripts))
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    finally:
+        sys.path[:] = search_path
+        for sibling in siblings:
+            sys.modules.pop(sibling, None)
+        sys.modules.update(saved)
     return module
 
 

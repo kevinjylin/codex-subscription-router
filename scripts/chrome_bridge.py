@@ -8,6 +8,77 @@ import re
 import struct
 import tarfile
 import tempfile
+import plistlib
+import subprocess
+
+
+def patch_runtime(source: str) -> str:
+    """Patch the upstream lifecycle, including refresh, registry and uninstall.
+
+    Anchors describe build 13536's functions; any drift blocks the build.
+    """
+    helper = "require(require(`node:path`).join(__dirname,`chrome-bridge.cjs`))"
+    selector = re.compile(
+        r"async function (?P<name>[\w$]+)\(e\)\{let t=[\w$]+\.Dt\(\),"
+        r"n=\(0,[\w$]+\.join\)\(e.codexHome,`plugins`,`cache`\),r=e.pluginRoot;"
+    )
+    matches = list(selector.finditer(source))
+    if len(matches) != 1:
+        raise RuntimeError("could not find Chrome native-host path selector")
+    match = matches[0]
+    head = f"async function {match.group('name')}(e){{"
+    source = source[:match.start()] + head + f"if(process.platform===`darwin`)return {helper}.selectHost(e);" + source[match.start()+len(head):]
+    registration = re.compile(
+        r"async function [\w$]+\(e\)\{let t=\{allowed_origins:.*?"
+        r"(?P<tail>await Promise\.all\(r\.map\(async e=>\{await [\w$]+\(e,Buffer\.from\(n\)\)\}\)\),await [\w$]+\(\{manifestPath:r\[0\],nativeHostName:e.nativeHostName\}\))\}"
+    )
+    matches = list(registration.finditer(source))
+    if len(matches) != 1:
+        raise RuntimeError("could not find Chrome native-host manifest writer")
+    match = matches[0]
+    # The real writer is exercised by staged boot, without modifying global
+    # Chrome registrations while another desktop instance is running.
+    tail = match.group('tail')
+    replacement = (
+        "if(process.env.CODEX_MUX_LAUNCH_CHECK===`1`){"
+        f"if(e.extensionHostPath!=={helper}.selectHost({{}}))throw Error(`Router Chrome host mismatch`);"
+        "console.log(`codex-router-chrome-registration-ready`);return;}"
+        + tail + f";{helper}.guard(r,e)"
+    )
+    source = source[:match.start('tail')] + replacement + source[match.end('tail'):]
+    uninstall = re.compile(r"(async function [\w$]+\(e\)\{let t=[\w$]+\(e.pluginName\);if\(t==null\)return;let n=[\w$]+\.parse\(e.marketplaceName\))")
+    if len(uninstall.findall(source)) != 1:
+        raise RuntimeError("could not find Chrome native-host uninstall lifecycle")
+    source = uninstall.sub(lambda m: m[0].replace("let n=", f"if(e.pluginName===`chrome`){helper}.stop(true);let n=", 1), source)
+    # Upstream removes registry entries by plugin-cache path. Our bridge is
+    # outside that cache: additionally match its exact path and owning home.
+    removal = re.compile(r"(return n!=null&&n\.nativeHostNames\.includes\(t.nativeHostName\)&&)(\(0,[\w$]+\.isAbsolute\)\(n.paths.extensionHostPath\)&&[\w$]+\(n.paths.extensionHostPath,t.pluginCacheRoot\))")
+    if len(removal.findall(source)) != 1:
+        raise RuntimeError("could not find Chrome native-host registry removal")
+    source = removal.sub(lambda m: m[1] + "((n.paths.codexHome===t.codexHome&&n.paths.extensionHostPath===" + helper + ".selectHost({}))||(" + m[2] + "))", source)
+    registry = re.compile(r"(async function [\w$]+\(e\)\{)(await Promise\.all\([\w$]+\(\{codexHome:e.codexHome\}\)\.map\(async t=>\{let\{contents:n,resources:r\}=)")
+    if len(registry.findall(source)) != 1:
+        raise RuntimeError("could not find Chrome native-host registry writer")
+    source = registry.sub(lambda m: m[1] + "if(process.env.CODEX_MUX_LAUNCH_CHECK===`1`)return;" + m[2], source)
+    return source
+
+
+def validate_bridge(app: Path) -> bool:
+    """Verify the packaged compatibility bridge before a staged boot can pass."""
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    team = info.get("CodexMuxSigningTeamIdentifier")
+    archive = app / "Contents/Resources/plugin-signatures/openai-bundled/chrome/plugin.tar.gz"
+    if team in (None, "adhoc") or not archive.is_file():
+        return False
+    bridge = app / BRIDGE_RELATIVE
+    data = bridge.read_bytes()
+    shim = team_comparison_shim(team)
+    if data[SHIM_OFFSET:SHIM_OFFSET + len(shim)] != shim or any(
+        data[call:call + 4] != branch(call, SHIM_OFFSET, link=True) for call in TEAM_COMPARISONS
+    ):
+        raise RuntimeError("packaged Chrome bridge does not match the router signing team")
+    subprocess.run(["codesign", "--verify", "--strict", str(bridge)], check=True, capture_output=True)
+    return True
 
 
 # ChatGPT 26.1002.52244 arm64. Refuse changed code instead of bypassing checks.

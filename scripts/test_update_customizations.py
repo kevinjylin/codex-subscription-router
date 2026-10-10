@@ -1,6 +1,8 @@
 """Exercise real Git merges without network or installed-app writes."""
 from pathlib import Path
 import subprocess
+import sys
+import types
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -110,6 +112,43 @@ class CustomizationUpdateTests(unittest.TestCase):
              patch.object(update, "build_stage") as build:
             self.assertEqual(update.check(settings), 0)
             self.assertEqual(build.call_args.args[-1], self.revision)
+
+
+
+class ReleaseImportTests(unittest.TestCase):
+    def test_sibling_imports_are_release_local_and_do_not_poison_next_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = [Path(temporary) / name for name in ("one", "two")]
+            previous = sys.modules.get("release_sibling")
+            sentinel = types.ModuleType("release_sibling")
+            sentinel.VALUE = "wrong checkout"
+            sys.modules["release_sibling"] = sentinel
+            search_path = sys.path[:]
+            try:
+                modules = []
+                for root in roots:
+                    (root / "scripts").mkdir(parents=True)
+                    (root / "scripts/release_sibling.py").write_text(f"VALUE = {root.name!r}\n")
+                    (root / "scripts/entry.py").write_text("from release_sibling import VALUE\n")
+                    modules.append(update.load_module(root, "entry"))
+                    self.assertIs(sys.modules["release_sibling"], sentinel)
+                    self.assertEqual(sys.path, search_path)
+                self.assertEqual([m.VALUE for m in modules], ["one", "two"])
+            finally:
+                if previous is None:
+                    sys.modules.pop("release_sibling", None)
+                else:
+                    sys.modules["release_sibling"] = previous
+
+    def test_copied_updater_imports_real_release_without_scripts_on_pythonpath(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / "update.py"
+            copied.write_text(Path(update.__file__).read_text())
+            source = Path(update.__file__).resolve().parent.parent
+            code = "import update; from pathlib import Path; print(update.load_module(Path(" + repr(str(source)) + "), 'patch_app').PROJECT_VERSION)"
+            result = subprocess.run([sys.executable, "-c", code], cwd=temporary, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), (source / "VERSION").read_text().strip())
 
 
 if __name__ == "__main__":

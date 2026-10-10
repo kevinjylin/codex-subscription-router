@@ -124,3 +124,20 @@ trust_level = "trusted"
                     prepare_desktop_home(source, target)
             self.assertTrue(private.is_symlink())
             self.assertEqual((private / 'output.html').read_text(), 'existing output')
+
+
+class ChromeRegistryIsolationTests(unittest.TestCase):
+    def test_old_shared_registry_is_detached_without_touching_official(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, target = Path(temporary) / "official", Path(temporary) / "router"
+            source.mkdir(); target.mkdir()
+            name = "chrome-native-hosts-v2.json"
+            (source / name).write_text('{"schemaVersion":2,"entries":[]}')
+            (target / name).symlink_to(source / name)
+            prepare_desktop_home(source, target)
+            self.assertFalse((target / name).exists())
+            self.assertFalse((target / name).is_symlink())
+            self.assertEqual((source / name).read_text(), '{"schemaVersion":2,"entries":[]}')
+            (target / name).write_text('{"private":true}')
+            prepare_desktop_home(source, target)
+            self.assertEqual((target / name).read_text(), '{"private":true}')
