@@ -23,6 +23,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   and pool quota windows by duration, including when their slots are swapped.
 - Respect both quota windows when routing while retaining purchased-credit
   support, the composer picker, chat moves, and router updates.
+- Keep Chrome available: the desktop now registers the router-signed Chrome
+  bridge on every plugin refresh instead of reverting to the vendor bridge,
+  which rejects the router's signing team. Supports builds `13536` and `20052`.
+- Let the updater import a release's sibling scripts, so customized releases
+  build again instead of failing with `ModuleNotFoundError`.
 
 ### Removed
 

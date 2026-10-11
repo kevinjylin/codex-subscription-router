@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import struct
 import tarfile
+import shutil
 import tempfile
 import plistlib
 import subprocess
@@ -15,11 +16,12 @@ import subprocess
 def patch_runtime(source: str) -> str:
     """Patch the upstream lifecycle, including refresh, registry and uninstall.
 
-    Anchors describe build 13536's functions; any drift blocks the build.
+    Anchors describe the functions in builds 13536 and 20052; any drift blocks
+    the build.
     """
     helper = "require(require(`node:path`).join(__dirname,`chrome-bridge.cjs`))"
     selector = re.compile(
-        r"async function (?P<name>[\w$]+)\(e\)\{let t=[\w$]+\.Dt\(\),"
+        r"async function (?P<name>[\w$]+)\(e\)\{let t=[\w$]+\.[\w$]+\(\),"
         r"n=\(0,[\w$]+\.join\)\(e.codexHome,`plugins`,`cache`\),r=e.pluginRoot;"
     )
     matches = list(selector.finditer(source))
@@ -63,6 +65,21 @@ def patch_runtime(source: str) -> str:
     return source
 
 
+
+def patch_runtime_bundle(build: Path, helper: Path) -> Path:
+    """Patch the one desktop chunk holding the lifecycle and add its helper.
+
+    Build 13536 bundles the lifecycle into bootstrap; 20052 moved it to a
+    shared chunk.
+    """
+    marker = "e.codexHome,`plugins`,`cache`),r=e.pluginRoot;"
+    chunks = [path for path in sorted(build.glob("*.js")) if marker in path.read_text(encoding="utf-8")]
+    if len(chunks) != 1:
+        raise RuntimeError(f"expected one Chrome native-host lifecycle chunk, found {len(chunks)}")
+    chunks[0].write_text(patch_runtime(chunks[0].read_text(encoding="utf-8")), encoding="utf-8")
+    shutil.copy2(helper, build / helper.name)
+    return chunks[0]
+
 def validate_bridge(app: Path) -> bool:
     """Verify the packaged compatibility bridge before a staged boot can pass."""
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
@@ -81,8 +98,12 @@ def validate_bridge(app: Path) -> bool:
     return True
 
 
-# ChatGPT 26.1002.52244 arm64. Refuse changed code instead of bypassing checks.
-HOST_SHA256 = "ff06f508870eef77fc2575cd0706dc277ab12cdfc8ee0662ffc25d52f94a6efc"
+# Refuse changed code instead of bypassing checks. 26.1007.21159 re-signed the
+# 26.1002.52244 arm64 bridge: every byte before its code signature is identical.
+HOST_SHA256S = {
+    "ff06f508870eef77fc2575cd0706dc277ab12cdfc8ee0662ffc25d52f94a6efc",  # 26.1002.52244
+    "35c18fe7b5a4fa00fc7c349a8c03462ba11eb150e1f3de7f225a63961ab8705f",  # 26.1007.21159
+}
 SHIM_OFFSET = 0xAFD00
 MEMCMP_OFFSET = 0x85560
 TEAM_COMPARISONS = (0x2A104, 0x2A16C)
@@ -123,7 +144,7 @@ def team_comparison_shim(team: str) -> bytes:
 
 def patch_bridge(data: bytes, team: str) -> bytes:
     shim = team_comparison_shim(team)
-    if hashlib.sha256(data).hexdigest() != HOST_SHA256:
+    if hashlib.sha256(data).hexdigest() not in HOST_SHA256S:
         raise RuntimeError("unsupported Chrome native bridge; its signing checks need review")
     if data[SHIM_OFFSET:SHIM_OFFSET + len(shim)] != bytes(len(shim)):
         raise RuntimeError("Chrome bridge padding changed")

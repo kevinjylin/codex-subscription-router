@@ -58,6 +58,28 @@ vm.createContext(context); vm.runInContext(PATCHED, context);
             result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_minified_names_may_change(self):
+        source = FIXTURE.read_text()
+        self.assertIn('o.Dt()', source)
+        self.assertIn('selectHost', chrome_bridge.patch_runtime(source.replace('o.Dt()', 'o.kt()')))
+
+    def test_lifecycle_is_found_in_any_single_desktop_chunk(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            build, helper = Path(scratch) / 'build', Path(scratch) / 'chrome-bridge.cjs'
+            build.mkdir(); helper.write_text('// helper')
+            (build / 'bootstrap-a.js').write_text('const e=require("./src-b.js");')
+            (build / 'src-b.js').write_text(FIXTURE.read_text())
+            self.assertEqual(chrome_bridge.patch_runtime_bundle(build, helper), build / 'src-b.js')
+            self.assertIn('selectHost', (build / 'src-b.js').read_text())
+            self.assertEqual((build / 'chrome-bridge.cjs').read_text(), '// helper')
+            (build / 'src-c.js').write_text(FIXTURE.read_text())
+            with self.assertRaises(RuntimeError):
+                chrome_bridge.patch_runtime_bundle(build, helper)
+            for chunk in build.glob('src-*.js'):
+                chunk.unlink()
+            with self.assertRaises(RuntimeError):
+                chrome_bridge.patch_runtime_bundle(build, helper)
+
     def test_missing_ambiguous_and_changed_anchors_fail_closed(self):
         original = FIXTURE.read_text()
         for source in ('', original + original, original.replace('e.pluginRoot;', 'e.otherRoot;')):

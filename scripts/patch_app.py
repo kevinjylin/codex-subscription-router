@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from desktop_home import prepare_desktop_home
-from chrome_bridge import build_bridge, register_bridge, patch_runtime
+from chrome_bridge import build_bridge, register_bridge, patch_runtime_bundle
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1711,10 +1711,9 @@ def patch_desktop_profile(
 
     # Updates come from the router's own releases, never an unpatched official build.
     bootstrap = attach_router_updater(bootstrap)
-    if chrome_bridge_enabled:
-        bootstrap = patch_runtime(bootstrap)
-        shutil.copy2(PROJECT_ROOT / "ui" / "chrome-bridge.cjs", bootstrap_path.parent / "chrome-bridge.cjs")
     bootstrap_path.write_text(bootstrap, encoding="utf-8")
+    if chrome_bridge_enabled:
+        patch_runtime_bundle(bootstrap_path.parent, PROJECT_ROOT / "ui" / "chrome-bridge.cjs")
     disable_updater_lifecycle(extracted)
 
     main_files = list((extracted / ".vite" / "build").glob("main-*.js"))
