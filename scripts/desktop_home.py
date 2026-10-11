@@ -8,10 +8,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 
-PRIVATE_ENTRIES = {"config.toml", "plugins", ".tmp", "tmp", "node_repl", "computer-use", "browser"}
+PRIVATE_ENTRIES = {"config.toml", "plugins", ".tmp", "tmp", "node_repl", "computer-use", "browser", "visualizations", "chrome-native-hosts-v2.json"}
 RUNTIME_SERVERS = {"node_repl", "computer-use", "cua_repl"}
 
 
@@ -88,6 +89,21 @@ def prepare_desktop_home(source: Path, target: Path) -> None:
         raise RuntimeError("desktop runtime home must be separate from the official home")
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
     target.chmod(0o700)
+    # This is executable-path metadata, not shared conversation history. Drop
+    # only a legacy link to the primary registry; desktop reconciliation will
+    # create a fresh private registry without modifying the official one.
+    registry = target / "chrome-native-hosts-v2.json"
+    if registry.is_symlink() and registry.resolve() == source / registry.name:
+        registry.unlink()
+    # The browser sandbox requires writable roots without symlink components.
+    visualizations = target / "visualizations"
+    if visualizations.is_symlink():
+        with tempfile.TemporaryDirectory(prefix=".visualizations-", dir=target) as scratch:
+            replacement = Path(scratch) / "visualizations"
+            shutil.copytree(visualizations.resolve(strict=True), replacement)
+            visualizations.unlink()
+            replacement.rename(visualizations)
+    visualizations.mkdir(mode=0o700, exist_ok=True)
     for name in PRIVATE_ENTRIES:
         if (target / name).is_symlink():
             raise RuntimeError(f"desktop runtime entry must not be shared: {name}")
@@ -121,7 +137,8 @@ def prepare_desktop_home(source: Path, target: Path) -> None:
     # authenticated desktop setup refreshes the definitions.
     for path in (target / "plugins" / "cache").rglob(".mcp.json"):
         text = path.read_text()
-        changed = text.replace(str(source), str(target))
+        # Match a complete home path, not the .codex prefix of .codex-mux.
+        changed = re.sub(re.escape(str(source)) + r'(?=[/":])', lambda _: str(target), text)
         if changed != text:
             json.loads(changed)
             path.write_text(changed)

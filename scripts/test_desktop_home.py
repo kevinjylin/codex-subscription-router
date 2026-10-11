@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from desktop_home import clean_runtime_config, prepare_desktop_home
 
@@ -57,3 +58,86 @@ trust_level = "trusted"
             (target / 'plugins').symlink_to(source)
             with self.assertRaisesRegex(RuntimeError, "must not be shared"):
                 prepare_desktop_home(source, target)
+
+    def test_repeated_setup_preserves_already_rebased_home_paths(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            source = (Path(scratch) / '.codex').resolve()
+            target = (Path(scratch) / '.codex-mux/desktop-home').resolve()
+            cache = source / 'plugins/cache/package'
+            cache.mkdir(parents=True)
+            (cache / '.mcp.json').write_text(json.dumps({'env': {
+                'CODEX_HOME': str(source),
+                'NODE_REPL_TRUSTED_CODE_PATHS': f'{source}:{source}/plugins',
+            }}))
+            prepare_desktop_home(source, target)
+            private = target / 'plugins/cache/package/.mcp.json'
+            expected = {'env': {
+                'CODEX_HOME': str(target),
+                'NODE_REPL_TRUSTED_CODE_PATHS': f'{target}:{target}/plugins',
+            }}
+            self.assertEqual(json.loads(private.read_text()), expected)
+            prepare_desktop_home(source, target)
+            self.assertEqual(json.loads(private.read_text()), expected)
+
+    def test_visualizations_are_private_on_fresh_setup(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            source, target = Path(scratch) / 'official', Path(scratch) / 'router'
+            (source / 'visualizations').mkdir(parents=True)
+            prepare_desktop_home(source, target)
+            private = target / 'visualizations'
+            self.assertTrue(private.is_dir())
+            self.assertFalse(private.is_symlink())
+            (private / 'router.html').write_text('router output')
+            self.assertFalse((source / 'visualizations/router.html').exists())
+            prepare_desktop_home(source, target)
+            self.assertEqual((private / 'router.html').read_text(), 'router output')
+
+    def test_visualization_symlink_migration_preserves_outputs(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            source, target = Path(scratch) / 'official', Path(scratch) / 'router'
+            original = source / 'visualizations/2026/10/08/session/output.html'
+            original.parent.mkdir(parents=True)
+            original.write_text('existing output')
+            target.mkdir()
+            private = target / 'visualizations'
+            private.symlink_to(source / 'visualizations', target_is_directory=True)
+            prepare_desktop_home(source, target)
+            self.assertFalse(private.is_symlink())
+            copied = private / original.relative_to(source / 'visualizations')
+            self.assertEqual(copied.read_text(), 'existing output')
+            copied.write_text('router output')
+            self.assertEqual(original.read_text(), 'existing output')
+            prepare_desktop_home(source, target)
+            self.assertEqual(copied.read_text(), 'router output')
+
+    def test_failed_visualization_copy_keeps_existing_link(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            source, target = Path(scratch) / 'official', Path(scratch) / 'router'
+            original = source / 'visualizations/output.html'
+            original.parent.mkdir(parents=True)
+            original.write_text('existing output')
+            target.mkdir()
+            private = target / 'visualizations'
+            private.symlink_to(original.parent, target_is_directory=True)
+            with patch('desktop_home.shutil.copytree', side_effect=OSError('copy failed')):
+                with self.assertRaisesRegex(OSError, 'copy failed'):
+                    prepare_desktop_home(source, target)
+            self.assertTrue(private.is_symlink())
+            self.assertEqual((private / 'output.html').read_text(), 'existing output')
+
+
+class ChromeRegistryIsolationTests(unittest.TestCase):
+    def test_old_shared_registry_is_detached_without_touching_official(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, target = Path(temporary) / "official", Path(temporary) / "router"
+            source.mkdir(); target.mkdir()
+            name = "chrome-native-hosts-v2.json"
+            (source / name).write_text('{"schemaVersion":2,"entries":[]}')
+            (target / name).symlink_to(source / name)
+            prepare_desktop_home(source, target)
+            self.assertFalse((target / name).exists())
+            self.assertFalse((target / name).is_symlink())
+            self.assertEqual((source / name).read_text(), '{"schemaVersion":2,"entries":[]}')
+            (target / name).write_text('{"private":true}')
+            prepare_desktop_home(source, target)
+            self.assertEqual((target / name).read_text(), '{"private":true}')

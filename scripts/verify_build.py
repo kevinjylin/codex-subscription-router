@@ -85,7 +85,8 @@ def main() -> int:
         before = digests(extracted)
         patcher.patch_asar_computer_use_identity(extracted, spec.asar_cua_identifier_replacements)
         patcher.patch_desktop_profile(
-            extracted, Path(scratch) / patcher.COMPUTER_USE_APP_NAME
+            extracted, Path(scratch) / patcher.COMPUTER_USE_APP_NAME,
+            chrome_bridge_enabled=(app / "Contents/Resources/plugin-signatures/openai-bundled/chrome/plugin.tar.gz").is_file(),
         )
         patcher.relax_native_pipe_peer_authorization(extracted)
         patcher.patch_renderer(extracted, "0" * 64)

@@ -23,12 +23,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   and pool quota windows by duration, including when their slots are swapped.
 - Respect both quota windows when routing while retaining purchased-credit
   support, the composer picker, chat moves, and router updates.
+- Keep Chrome available: the desktop now registers the router-signed Chrome
+  bridge on every plugin refresh instead of reverting to the vendor bridge,
+  which rejects the router's signing team. Supports builds `13536` and `20052`.
+- Let the updater import a release's sibling scripts, so customized releases
+  build again instead of failing with `ModuleNotFoundError`.
 
 ### Removed
 
 - Session account switching and its automatic-routing action in the profile
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
+
+## [0.15.0] - 2026-10-09
+
+### Added
+
+- Compatibility with official ChatGPT build `20052` (26.1007.21159),
+  bundling Codex 0.162.0-alpha.17.2. Builds `13520` and `13536` remain
+  supported; build `13232` is retired.
+
+### Fixed
+
+- Remove the official app's restricted communication-notification entitlement
+  when signing the independent app, so build `20052` can boot.
+
+## [0.14.0] - 2026-10-07
+
+### Added
+
+- Compatibility with official ChatGPT builds `13536` (26.1002.52244,
+  Codex 0.162.0-alpha.2) and `13520` (26.930.61225, Codex 0.160.1).
+  Build `13232` remains supported; builds `13022` and `13100` are retired.
 
 ## [0.13.0] - 2026-10-06
 
@@ -363,7 +389,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.15.0
+[0.14.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.14.0
 [0.13.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.13.0
 [0.12.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.12.0
 [0.11.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.11.0

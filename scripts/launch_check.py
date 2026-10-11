@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import plistlib
 import signal
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from patch_app import codex_entrypoint, stop_lingering_helpers  # noqa: E402
 from desktop_home import prepare_desktop_home  # noqa: E402
+from chrome_bridge import validate_bridge  # noqa: E402
 
 READY = ("codex-router-renderer-ready", "[AppServerConnection] response_routed")
 
@@ -49,10 +51,14 @@ def main() -> int:
     args = parser.parse_args()
 
     app = args.app.expanduser().resolve()
+    required = set(READY)
+    if validate_bridge(app):
+        required.add("codex-router-chrome-registration-ready")
     primary_home = Path.home() / ".codex"
     runtime_home = Path.home() / ".codex-mux" / "desktop-home"
     prepare_desktop_home(primary_home, runtime_home)
-    executable = app / "Contents" / "MacOS" / "ChatGPT"
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    executable = app / "Contents" / "MacOS" / info["CFBundleExecutable"]
     with tempfile.TemporaryDirectory(prefix="codex-router-launch-") as profile:
         log_path = Path(profile) / "launch.log"
         with log_path.open("w") as log:
@@ -77,19 +83,21 @@ def main() -> int:
         try:
             while time.monotonic() < deadline and process.poll() is None:
                 output = log_path.read_text(errors="replace")
-                seen = {marker for marker in READY if marker in output}
+                seen = {marker for marker in required if marker in output}
                 if any("initialize_handshake_result" in line and "outcome=success" in line
                        for line in output.splitlines()):
                     seen.add(READY[1])
-                if len(seen) == len(READY) or "FATAL:" in output:
+                if seen == required or "FATAL:" in output:
                     break
                 time.sleep(1)
         finally:
             stop(process, app)
         output = log_path.read_text(errors="replace")
 
-    if len(seen) == len(READY) and "FATAL:" not in output:
-        print("launched: renderer running and app-server answering")
+    if seen == required and "FATAL:" not in output:
+        print("launched: renderer and app-server ready; " +
+              ("Chrome registration lifecycle verified (live browser connection still requires a separate check)"
+               if len(required) > len(READY) else "Chrome compatibility not checked"))
         return 0
     print(f"launch failed (exit {process.returncode}, saw {sorted(seen) or 'nothing'}):")
     for line in output.splitlines()[-15:]:
