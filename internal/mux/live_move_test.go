@@ -49,10 +49,17 @@ func TestLiveMoveKeepsHistoryOnBothAccounts(t *testing.T) {
 		}
 	}
 	output := &lockedBuffer{}
+	environment := []string{}
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "CODEX_MUX_PRIMARY_SQLITE_HOME=") {
+			environment = append(environment, entry)
+		}
+	}
+	environment = append(environment, "CODEX_MUX_PRIMARY_SQLITE_HOME="+primaryHome)
 	m, err := New(Options{
 		RealExecutable: codex,
 		RealArgs:       []string{"-c", "features.code_mode_host=true", "app-server"},
-		Environment:    os.Environ(),
+		Environment:    environment,
 		Store:          store,
 		Output:         output,
 	})
@@ -82,7 +89,7 @@ func TestLiveMoveKeepsHistoryOnBothAccounts(t *testing.T) {
 	t.Logf("after move: work %s", describeHome(t, work.CodexHome, threadID))
 	client.turn(threadID, "Reply with exactly: moved-to-work")
 	t.Logf("after work turn: work %s", describeHome(t, work.CodexHome, threadID))
-	if onWork := projectedTurns(t, work.CodexHome, threadID); onWork != before+1 {
+	if onWork := awaitProjectedTurns(t, work.CodexHome, threadID, before+1); onWork != before+1 {
 		t.Fatalf("work projects %d turns after its turn, want %d", onWork, before+1)
 	}
 	if got := client.turnCount(threadID); got == 0 {
@@ -100,7 +107,7 @@ func TestLiveMoveKeepsHistoryOnBothAccounts(t *testing.T) {
 	}
 	client.turn(threadID, "Reply with exactly: back-on-primary")
 	t.Logf("after primary turn: primary %s", describeHome(t, primaryHome, threadID))
-	if onPrimary := projectedTurns(t, primaryHome, threadID); onPrimary != before+2 {
+	if onPrimary := awaitProjectedTurns(t, primaryHome, threadID, before+2); onPrimary != before+2 {
 		t.Fatalf("primary projects %d turns after moving back, want %d", onPrimary, before+2)
 	}
 	// The owner's projection covers every file; the previous owner lags by
@@ -121,7 +128,7 @@ func TestLiveMoveKeepsHistoryOnBothAccounts(t *testing.T) {
 		t.Fatalf("move to work a second time: %v", err)
 	}
 	client.turn(threadID, "Reply with exactly: work-again")
-	if onWork := projectedTurns(t, work.CodexHome, threadID); onWork != before+3 {
+	if onWork := awaitProjectedTurns(t, work.CodexHome, threadID, before+3); onWork != before+3 {
 		t.Fatalf("work projects %d turns after its second stint, want %d", onWork, before+3)
 	}
 }
@@ -145,10 +152,23 @@ func (c *liveClient) request(method string, params any) map[string]any {
 }
 
 func (c *liveClient) turn(threadID, text string) {
-	c.request("turn/start", map[string]any{"threadId": threadID, "input": []map[string]any{{"type": "text", "text": text}}})
-	c.output.await(c.t, func(message map[string]any) bool {
-		return message["method"] == "turn/completed"
+	response := c.request("turn/start", map[string]any{"threadId": threadID, "input": []map[string]any{{"type": "text", "text": text}}})
+	result, _ := response["result"].(map[string]any)
+	turn, _ := result["turn"].(map[string]any)
+	turnID, _ := turn["id"].(string)
+	if turnID == "" {
+		c.t.Fatalf("turn/start failed: %v", response["error"])
+	}
+	completion := c.output.await(c.t, func(message map[string]any) bool {
+		params, _ := message["params"].(map[string]any)
+		completed, _ := params["turn"].(map[string]any)
+		return message["method"] == "turn/completed" && params["threadId"] == threadID && completed["id"] == turnID
 	}, 300*time.Second)
+	params, _ := completion["params"].(map[string]any)
+	completed, _ := params["turn"].(map[string]any)
+	if completed["status"] != "completed" {
+		c.t.Fatalf("model turn did not complete: status=%v error=%v", completed["status"], completed["error"])
+	}
 }
 
 func (c *liveClient) turnCount(threadID string) int {
@@ -223,6 +243,18 @@ func projectedTurns(t *testing.T, home, threadID string) int {
 		total += n
 	}
 	return total
+}
+
+// Model completion precedes the asynchronous rollout/history flush.
+func awaitProjectedTurns(t *testing.T, home, threadID string, want int) int {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		got := projectedTurns(t, home, threadID)
+		if got >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func describeHome(t *testing.T, home, threadID string) string {

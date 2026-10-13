@@ -90,7 +90,9 @@ UI and an initialized app-server, without a test-server port. Signing and
 Electron hardening only show up here. The router, adjacent `codex.real`, and
 `codex-cli/bin/codex` must each print the Codex version. Then run the live
 move test against the staged `codex.real` (`scripts/live_seed.py` prepares its
-home). After his "go", quit the app, install with
+home). The live test must force `CODEX_MUX_PRIMARY_SQLITE_HOME` into its copied
+primary home; never inherit the running desktop's database path. After his
+"go", quit the app, install with
 `patch_app.py --install-staged ~/.codex-mux/port-stage --destination <app>`
 (delete a broken installed copy by exact path first so the backup stays the
 last good build), relaunch with `launchctl setenv CODEX_MUX_UI_TESTS 1`, and
