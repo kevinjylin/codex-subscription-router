@@ -26,6 +26,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Keep Chrome available: the desktop now registers the router-signed Chrome
   bridge on every plugin refresh instead of reverting to the vendor bridge,
   which rejects the router's signing team. Supports builds `13536` and `20052`.
+- Accept the re-signed Chrome native bridges in builds `20156` and `20324`
+  after verifying their pre-signature bytes match the reviewed bridge.
+- Verify the bundled Chrome bridge during exact-build checks, before staging.
 - Let the updater import a release's sibling scripts, so customized releases
   build again instead of failing with `ModuleNotFoundError`.
 
@@ -34,6 +37,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Session account switching and its automatic-routing action in the profile
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
+## [0.17.0] - 2026-10-13
+
+### Added
+
+- Compatibility with official ChatGPT build `20324` (26.1007.41230),
+  bundling Codex 0.162.0-alpha.17.2. Builds `20156` and `20052` remain
+  supported; build `13536` is retired.
+
+## [0.16.0] - 2026-10-11
+
+### Added
+
+- Compatibility with official ChatGPT build `20156` (26.1007.30912),
+  bundling Codex 0.162.0-alpha.17.2. Builds `20052` and `13536` remain
+  supported; build `13520` is retired.
+
+### Changed
+
+- Select renderer profiles by both the menu and RPC anchors, rejecting
+  ambiguous matches when adjacent builds share unchanged UI chunks.
 
 ## [0.15.0] - 2026-10-09
 
@@ -389,7 +412,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.17.0
+[0.16.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.16.0
 [0.15.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.15.0
 [0.14.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.14.0
 [0.13.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.13.0

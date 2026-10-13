@@ -1,16 +1,40 @@
 """Exercise the bridge's actual arm64 comparator and preserved registration."""
 
 import json
+import hashlib
 from pathlib import Path
 import platform
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import chrome_bridge
 
 
 class ChromeBridgeTests(unittest.TestCase):
+    def test_approved_binary_still_requires_original_calls_and_empty_padding(self):
+        data = bytearray(chrome_bridge.SHIM_OFFSET + len(chrome_bridge._SHIM))
+        for call in chrome_bridge.TEAM_COMPARISONS:
+            data[call:call + 4] = chrome_bridge.branch(call, chrome_bridge.MEMCMP_OFFSET, link=True)
+        original = bytes(data)
+        with patch.object(chrome_bridge, 'HOST_SHA256S', {hashlib.sha256(original).hexdigest()}):
+            patched = chrome_bridge.patch_bridge(original, 'C5467MV9FT')
+            for call in chrome_bridge.TEAM_COMPARISONS:
+                self.assertEqual(patched[call:call + 4], chrome_bridge.branch(call, chrome_bridge.SHIM_OFFSET, link=True))
+            changed = set(range(chrome_bridge.SHIM_OFFSET, len(data)))
+            for call in chrome_bridge.TEAM_COMPARISONS:
+                changed.update(range(call, call + 4))
+            self.assertTrue(all(a == b for i, (a, b) in enumerate(zip(original, patched)) if i not in changed))
+        for offset, message in ((chrome_bridge.SHIM_OFFSET, 'padding changed'),
+                                *((call, 'team comparison changed') for call in chrome_bridge.TEAM_COMPARISONS)):
+            with self.subTest(offset=offset):
+                changed = bytearray(original)
+                changed[offset] ^= 1
+                with patch.object(chrome_bridge, 'HOST_SHA256S', {hashlib.sha256(changed).hexdigest()}):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        chrome_bridge.patch_bridge(bytes(changed), 'C5467MV9FT')
+
     def test_unknown_binary_or_invalid_team_is_rejected(self):
         for data, team in ((b"changed native host", "C5467MV9FT"), (b"", "invalid")):
             with self.subTest(team=team):

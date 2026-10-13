@@ -98,11 +98,14 @@ def validate_bridge(app: Path) -> bool:
     return True
 
 
-# Refuse changed code instead of bypassing checks. 26.1007.21159 re-signed the
-# 26.1002.52244 arm64 bridge: every byte before its code signature is identical.
+# These builds re-sign the same arm64 bridge: every byte before the signature
+# at 0xFC690 matches 13536 (SHA-256 c945c8f297835293c7d9a67769efb0ecf2
+# 4af665e0020505157b30e6794e94e6). Refuse any other binary.
 HOST_SHA256S = {
     "ff06f508870eef77fc2575cd0706dc277ab12cdfc8ee0662ffc25d52f94a6efc",  # 26.1002.52244
     "35c18fe7b5a4fa00fc7c349a8c03462ba11eb150e1f3de7f225a63961ab8705f",  # 26.1007.21159
+    "13336650cc08004a974a4478ea90897f16ae19ff9053e2939b06d9b6e7c93772",  # 26.1007.30912
+    "0ea10cbb02e3a1ec0094027c75696e1f945cef54ecff31b676583e7add577392",  # 26.1007.41230
 }
 SHIM_OFFSET = 0xAFD00
 MEMCMP_OFFSET = 0x85560

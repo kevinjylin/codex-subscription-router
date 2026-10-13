@@ -18,6 +18,7 @@ import importlib.util
 import plistlib
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -77,6 +78,16 @@ def main() -> int:
         (framework / "Versions" / "Current" / framework.stem).read_bytes()
     )
     print(f"framework ASAR integrity seal: {'present' if seal else 'none'}")
+
+    bridge_archive = app / "Contents/Resources/plugin-signatures/openai-bundled/chrome/plugin.tar.gz"
+    if bridge_archive.is_file():
+        from chrome_bridge import patch_bridge
+        with tarfile.open(bridge_archive) as package:
+            bridge = package.extractfile("extension-host/macos/arm64/ChatGPT for Chrome")
+            if bridge is None:
+                raise RuntimeError("bundled Chrome native bridge is missing")
+            patch_bridge(bridge.read(), "C5467MV9FT")
+        print("Chrome native bridge signing anchors: verified")
 
     with tempfile.TemporaryDirectory() as scratch:
         extracted = Path(scratch) / "asar"
