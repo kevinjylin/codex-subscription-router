@@ -29,6 +29,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Accept the re-signed Chrome native bridges in builds `20156` and `20324`
   after verifying their pre-signature bytes match the reviewed bridge.
 - Verify the bundled Chrome bridge during exact-build checks, before staging.
+- Accept the re-signed Chrome bridges in builds `20398` and `20586` after
+  verifying every byte before their code signatures matches the reviewed bridge.
 - Let the updater import a release's sibling scripts, so customized releases
   build again instead of failing with `ModuleNotFoundError`.
 
@@ -37,6 +39,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Session account switching and its automatic-routing action in the profile
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
+
+## [0.20.0] - 2026-10-16
+
+### Added
+
+- Compatibility with official ChatGPT build `20586` (26.1013.31256),
+  bundling Codex 0.163.0-alpha.10.2. Builds `20398` and `20324` remain
+  supported; build `20156` is retired.
+
+## [0.19.1] - 2026-10-16
+
+### Fixed
+
+- A subscription no longer stops answering after one very large reply. The
+  router read each app-server message as a line of at most 64 MB; a chat with
+  a long history answered past that, the reader gave up, and every later
+  request to that subscription waited forever, so queued messages never sent,
+  Stop did nothing and the account menu hung. Messages of any length are read
+  now, and an app-server whose reader stops is ended so requests fail at once.
+- Installing an update no longer fails while Claude Code sessions are open.
+  Their `sessions` MCP servers run from the app bundle, and the installer
+  waited for them to exit; they keep working from the replaced files, so the
+  installer now ignores them.
+- The updater's output reaches `~/.codex-mux/logs/update.log`, the log an
+  install failure points to. It was discarded.
+
+## [0.19.0] - 2026-10-14
+
+### Added
+
+- Compatibility with official ChatGPT build `20398` (26.1007.71326),
+  bundling Codex 0.162.0-alpha.17.2. Builds `20324` and `20156` remain
+  supported; build `20052` is retired.
+
+### Changed
+
+- Include the menu helper anchor when selecting a renderer profile, so builds
+  sharing the menu marker and RPC code remain distinguishable.
+
+## [0.18.0] - 2026-10-14
+
+### Added
+
+- Codex chats and Claude Code sessions on this Mac can list, read, and message
+  each other. The new `sessions` MCP server (`codex sessions-mcp`) and skill are
+  registered with Codex and Claude Code at install. Every Codex chat gets an
+  inbox address in Claude Code's own form, so Claude's `SendMessage` reaches
+  Codex chats, and a message starts a turn in the receiving chat or joins the
+  turn it is running.
+
 ## [0.17.0] - 2026-10-13
 
 ### Added
@@ -412,7 +464,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.20.0
+[0.19.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.19.1
+[0.19.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.19.0
+[0.18.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.18.0
 [0.17.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.17.0
 [0.16.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.16.0
 [0.15.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.15.0

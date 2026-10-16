@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -108,6 +109,9 @@ type Multiplexer struct {
 	selectedAccountID string
 
 	snapshots *snapshotCache
+
+	inboxMu sync.Mutex
+	inboxes map[string]*net.UnixListener
 }
 
 func New(options Options) (*Multiplexer, error) {
@@ -134,6 +138,7 @@ func New(options Options) (*Multiplexer, error) {
 		resetCreditsEndpoint: rateLimitResetCreditsURL,
 		resetPreviews:        make(map[string]ResetCreditsPreview),
 		snapshots:            newSnapshotCache(),
+		inboxes:              make(map[string]*net.UnixListener),
 	}, nil
 }
 
@@ -147,6 +152,7 @@ func (m *Multiplexer) Start(ctx context.Context) error {
 		return errors.New("no Codex app-server process could be started")
 	}
 	go m.inboundLoop(ctx)
+	m.reopenInboxes()
 	go m.syncManagedConfigLoop(ctx)
 	go m.reconcileUnifiedCatalogLoop(ctx)
 	return nil
@@ -173,6 +179,7 @@ func (m *Multiplexer) syncManagedConfigLoop(ctx context.Context) {
 }
 
 func (m *Multiplexer) Close() {
+	m.closeInboxes()
 	for _, entry := range m.childEntries() {
 		_ = entry.child.Close()
 	}
