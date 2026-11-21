@@ -209,13 +209,30 @@ def merge_release(source: Path, revision: str, version: str, repository: str) ->
     return target
 
 
+def archive_url(offered: list[tuple[str, str, str]], version: str) -> str | None:
+    """The CDN archive for a build the appcast no longer lists.
+
+    The appcast keeps only a few recent builds, while every archive stays on
+    the CDN under its version. Reuse a listed archive's URL with the version
+    swapped; the patcher still checks the app.asar hash before building.
+    """
+    for listed_version, _, url in offered:
+        if url.count(listed_version) == 1:
+            return url.replace(listed_version, version)
+    return None
+
+
 def choose_build(source: Path) -> tuple[str, str | None]:
     """The newest official build the release supports that is here or offered."""
-    supported = {build for _, build in load_module(source, "patch_app").SUPPORTED_BUILDS}
-    offered = {build: url for _, build, url in load_module(source, "appcast").builds()}
-    for build in sorted(supported, key=int, reverse=True):
+    supported = load_module(source, "patch_app").SUPPORTED_BUILDS
+    builds = load_module(source, "appcast").builds()
+    offered = {build: url for _, build, url in builds}
+    for version, build in sorted(supported, key=lambda key: int(key[1]), reverse=True):
         if (SOURCES / f"ChatGPT-{build}.app").is_dir() or build in offered:
             return build, offered.get(build)
+        url = archive_url(builds, version)
+        if url is not None:
+            return build, url
     raise RuntimeError("no official build this release supports can be downloaded")
 
 

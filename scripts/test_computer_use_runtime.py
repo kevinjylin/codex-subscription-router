@@ -34,6 +34,24 @@ class ComputerUseRuntimeTests(unittest.TestCase):
             self.assertIsNone(entry["serviceNativePipePath"])
             self.assertIsNone(entry["serviceAppPath"])
 
+    def test_inlined_26605_shape_gets_router_socket_on_mac(self):
+        source = (
+            "({serviceAppPath:\"darwin\"===m.platform?u.serviceAppPath:null,"
+            "serviceNativePipePath:\"darwin\"===m.platform&&p?eM().env[rz]:null})"
+        )
+        pipe = Path("/tmp/router/computer-use.sock")
+        patched = patch_app.patch_computer_use_runtime_pipe(source, pipe)
+        script = (
+            "const eM=()=>({env:{}}),rz='SKY_CUA_SERVICE_NATIVE_PIPE_PATH';"
+            "const u={serviceAppPath:'/tmp/helper.app'};const result=[];"
+            "for(const platform of ['darwin','win32'])for(const p of [false,true]){"
+            "const m={platform};result.push(" + patched + ");}"
+            "console.log(JSON.stringify(result));"
+        )
+        result = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+        self.assertEqual([entry["serviceNativePipePath"] for entry in result],
+                         [str(pipe), str(pipe), None, None])
+
     def test_missing_or_ambiguous_anchor_fails_closed(self):
         source = "serviceNativePipePath:m.platform===`darwin`&&p?P.default.env[pa]:null"
         for invalid in ["", source + "," + source, source.replace("darwin", "linux")]:

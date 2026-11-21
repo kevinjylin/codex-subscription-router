@@ -1588,17 +1588,20 @@ def patch_computer_use_runtime_pipe(main: str, pipe: Path) -> str:
     The upstream production MCP configuration otherwise omits the override,
     leaving callers on the Apple-team group-container default.
     """
+    # 20770 writes `h.platform===\`darwin\`&&m?P.default.env[Ga]`; 26605
+    # writes `"darwin"===h.platform&&u?eM().env[rz]`.
+    identifier = r"[A-Za-z_$][\w$]*"
     pattern = re.compile(
-        r"serviceNativePipePath:(?P<platform>[A-Za-z_$][\w$]*)"
-        r"\.platform===`darwin`&&[A-Za-z_$][\w$]*\?"
-        r"[A-Za-z_$][\w$]*\.default\.env\[[A-Za-z_$][\w$]*\]:null"
+        rf"serviceNativePipePath:(?:(?P<platform>{identifier})\.platform===[`\"]darwin[`\"]"
+        rf"|[`\"]darwin[`\"]===(?P<platform_>{identifier})\.platform)&&{identifier}\?"
+        rf"(?:{identifier}\.default|{identifier}\(\))\.env\[{identifier}\]:null"
     )
     if len(pattern.findall(main)) != 1:
         raise RuntimeError("could not find the Computer Use runtime socket setting")
     return pattern.sub(
         lambda match: (
-            f"serviceNativePipePath:{match.group('platform')}.platform===`darwin`?"
-            f"{json.dumps(str(pipe))}:null"
+            f"serviceNativePipePath:{match.group('platform') or match.group('platform_')}"
+            f".platform===`darwin`?{json.dumps(str(pipe))}:null"
         ),
         main,
     )

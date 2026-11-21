@@ -33,6 +33,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   verifying every byte before their code signatures matches the reviewed bridge.
 - Let the updater import a release's sibling scripts, so customized releases
   build again instead of failing with `ModuleNotFoundError`.
+- Merge upstream 0.30.0 and carry the Chrome bridge lifecycle and Computer Use
+  socket patches to build `26605`'s inlined main process. Accept its re-signed
+  Chrome bridge after verifying every byte before its code signature.
+- Download a supported official build from the CDN when the appcast no longer
+  lists it, so a release whose builds aged out of the feed still installs.
 
 ### Removed
 

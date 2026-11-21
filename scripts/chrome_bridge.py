@@ -13,26 +13,36 @@ import plistlib
 import subprocess
 
 
+# Builds up to 20770 use named functions and backtick strings; 26605 inlines
+# the same helpers as anonymous functions with double-quoted strings.
+Q = "[`\"]"
+CALL = r"(?:[\w$]+\.[\w$]+|\(0,[\w$]+\.[\w$]+\))\(\)"
+LIFECYCLE_MARKER = re.compile(
+    rf"e\.codexHome,{Q}plugins{Q},{Q}cache{Q}\),r=e\.pluginRoot;"
+)
+
+
 def patch_runtime(source: str) -> str:
     """Patch the upstream lifecycle, including refresh, registry and uninstall.
 
-    Anchors describe the functions in builds 13536 and 20052; any drift blocks
-    the build.
+    Anchors describe the functions in builds 13536 through 26605; any drift
+    blocks the build.
     """
     helper = "require(require(`node:path`).join(__dirname,`chrome-bridge.cjs`))"
     selector = re.compile(
-        r"async function (?P<name>[\w$]+)\(e\)\{let t=[\w$]+\.[\w$]+\(\),"
-        r"n=\(0,[\w$]+\.join\)\(e.codexHome,`plugins`,`cache`\),r=e.pluginRoot;"
+        rf"(?P<head>async function(?: [\w$]+)?\(e\)\{{)let t={CALL},"
+        rf"n=\(0,[\w$]+\.join\)\({LIFECYCLE_MARKER.pattern}"
     )
     matches = list(selector.finditer(source))
     if len(matches) != 1:
         raise RuntimeError("could not find Chrome native-host path selector")
-    match = matches[0]
-    head = f"async function {match.group('name')}(e){{"
-    source = source[:match.start()] + head + f"if(process.platform===`darwin`)return {helper}.selectHost(e);" + source[match.start()+len(head):]
+    end = matches[0].end("head")
+    source = source[:end] + f"if(process.platform===`darwin`)return {helper}.selectHost(e);" + source[end:]
     registration = re.compile(
-        r"async function [\w$]+\(e\)\{let t=\{allowed_origins:.*?"
-        r"(?P<tail>await Promise\.all\(r\.map\(async e=>\{await [\w$]+\(e,Buffer\.from\(n\)\)\}\)\),await [\w$]+\(\{manifestPath:r\[0\],nativeHostName:e.nativeHostName\}\))\}"
+        r"async function(?: [\w$]+)?\(e\)\{let t=\{allowed_origins:[\s\S]*?"
+        r"(?P<tail>await Promise\.all\(r\.map\(async e=>\{await [\w$]+\(e,Buffer\.from\(n\)\)\}\)\),"
+        r"await (?:[\w$]+|async function\(e\)\{[\s\S]*?\})"
+        r"\(\{manifestPath:r\[0\],nativeHostName:e\.nativeHostName\}\))\}"
     )
     matches = list(registration.finditer(source))
     if len(matches) != 1:
@@ -48,32 +58,48 @@ def patch_runtime(source: str) -> str:
         + tail + f";{helper}.guard(r,e)"
     )
     source = source[:match.start('tail')] + replacement + source[match.end('tail'):]
-    uninstall = re.compile(r"(async function [\w$]+\(e\)\{let t=[\w$]+\(e.pluginName\);if\(t==null\)return;let n=[\w$]+\.parse\(e.marketplaceName\))")
+    uninstall = re.compile(
+        r"async function [\w$]+\(e\)\{let t=[\w$]+\(e\.pluginName\);"
+        r"if\((?:t==null|null==t)\)return;(?=let n=[\w$]+\.parse\(e\.marketplaceName\))"
+    )
     if len(uninstall.findall(source)) != 1:
         raise RuntimeError("could not find Chrome native-host uninstall lifecycle")
-    source = uninstall.sub(lambda m: m[0].replace("let n=", f"if(e.pluginName===`chrome`){helper}.stop(true);let n=", 1), source)
+    source = uninstall.sub(lambda m: m[0] + f"if(e.pluginName===`chrome`){helper}.stop(true);", source)
     # Upstream removes registry entries by plugin-cache path. Our bridge is
     # outside that cache: additionally match its exact path and owning home.
-    removal = re.compile(r"(return n!=null&&n\.nativeHostNames\.includes\(t.nativeHostName\)&&)(\(0,[\w$]+\.isAbsolute\)\(n.paths.extensionHostPath\)&&[\w$]+\(n.paths.extensionHostPath,t.pluginCacheRoot\))")
+    removal = re.compile(
+        r"(?P<head>(?:return [\w$]+!=null|null!=\([\w$]+=[\w$]+\([\w$]+\)\))&&"
+        r"(?P<entry>[\w$]+)\.nativeHostNames\.includes\((?P<host>[\w$]+)\.nativeHostName\)&&)"
+        r"(?P<tail>\(0,[\w$]+\.isAbsolute\)\((?P=entry)\.paths\.extensionHostPath\)&&"
+        r"[\w$]+\((?P=entry)\.paths\.extensionHostPath,(?P=host)\.pluginCacheRoot\))"
+    )
     if len(removal.findall(source)) != 1:
         raise RuntimeError("could not find Chrome native-host registry removal")
-    source = removal.sub(lambda m: m[1] + "((n.paths.codexHome===t.codexHome&&n.paths.extensionHostPath===" + helper + ".selectHost({}))||(" + m[2] + "))", source)
-    registry = re.compile(r"(async function [\w$]+\(e\)\{)(await Promise\.all\([\w$]+\(\{codexHome:e.codexHome\}\)\.map\(async t=>\{let\{contents:n,resources:r\}=)")
+    source = removal.sub(
+        lambda m: m["head"] + f"(({m['entry']}.paths.codexHome==={m['host']}.codexHome&&"
+        f"{m['entry']}.paths.extensionHostPath==={helper}.selectHost({{}}))||({m['tail']}))",
+        source,
+    )
+    registry = re.compile(
+        r"(async function(?: [\w$]+)?\(e\)\{)(await Promise\.all\([\w$]+\(\{codexHome:e\.codexHome\}\)"
+        r"\.map\(async t=>\{(?:var [\w$,]+;)?let\{contents:[\w$]+,resources:[\w$]+\}=)"
+    )
     if len(registry.findall(source)) != 1:
         raise RuntimeError("could not find Chrome native-host registry writer")
     source = registry.sub(lambda m: m[1] + "if(process.env.CODEX_MUX_LAUNCH_CHECK===`1`)return;" + m[2], source)
     return source
 
 
-
 def patch_runtime_bundle(build: Path, helper: Path) -> Path:
     """Patch the one desktop chunk holding the lifecycle and add its helper.
 
     Build 13536 bundles the lifecycle into bootstrap; 20052 moved it to a
-    shared chunk.
+    shared chunk, and 26605 to an early-bootstrap chunk.
     """
-    marker = "e.codexHome,`plugins`,`cache`),r=e.pluginRoot;"
-    chunks = [path for path in sorted(build.glob("*.js")) if marker in path.read_text(encoding="utf-8")]
+    chunks = [
+        path for path in sorted(build.glob("*.js"))
+        if LIFECYCLE_MARKER.search(path.read_text(encoding="utf-8"))
+    ]
     if len(chunks) != 1:
         raise RuntimeError(f"expected one Chrome native-host lifecycle chunk, found {len(chunks)}")
     chunks[0].write_text(patch_runtime(chunks[0].read_text(encoding="utf-8")), encoding="utf-8")
@@ -105,6 +131,7 @@ HOST_SHA256S = {
     "cc43d9b512e43965eb70e8cdcf304b48b4c413516e9fc176c3e3f8de22bf827c",  # 26.1007.71326
     "39a8f8d2885c416479b7eab3b7ca2e2a9c1b7d39945b456bb3da18977949aa21",  # 26.1013.31256
     "2296f0eb19652d45cebe67cf26e454eef52031a40b9ed2d21184c761f67f05cd",  # 26.1013.40934
+    "938f0238ba1c05d87d6def4551f548bef457112edc72908a567dca76b0e90cc1",  # 26.1106.51428
 }
 SHIM_OFFSET = 0xAFD00
 MEMCMP_OFFSET = 0x85560

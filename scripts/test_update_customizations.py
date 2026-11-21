@@ -151,5 +151,38 @@ class ReleaseImportTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), (source / "VERSION").read_text().strip())
 
 
+class ChooseBuildTests(unittest.TestCase):
+    CDN = "https://cdn.test/ChatGPT-darwin-arm64-{}.zip"
+
+    def choose(self, supported, offered, cached=()):
+        modules = {
+            "patch_app": types.SimpleNamespace(SUPPORTED_BUILDS=dict.fromkeys(supported)),
+            "appcast": types.SimpleNamespace(builds=lambda: [
+                (version, build, self.CDN.format(version)) for version, build in offered
+            ]),
+        }
+        with tempfile.TemporaryDirectory() as sources:
+            for build in cached:
+                (Path(sources) / f"ChatGPT-{build}.app").mkdir()
+            with patch.object(update, "SOURCES", Path(sources)), \
+                 patch.object(update, "load_module", lambda _, name: modules[name]):
+                return update.choose_build(Path("release"))
+
+    def test_prefers_newest_supported_build_the_appcast_offers(self):
+        self.assertEqual(
+            self.choose([("1.2", "20"), ("1.3", "30")], [("1.4", "40"), ("1.3", "30")]),
+            ("30", self.CDN.format("1.3")),
+        )
+
+    def test_uses_a_cached_source_before_downloading(self):
+        self.assertEqual(self.choose([("1.3", "30")], [("1.4", "40")], cached=["30"]), ("30", None))
+
+    def test_fetches_a_supported_build_the_appcast_dropped_from_the_cdn(self):
+        self.assertEqual(
+            self.choose([("1.2", "20"), ("1.3", "30")], [("1.5", "50"), ("1.4", "40")]),
+            ("30", self.CDN.format("1.3")),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
