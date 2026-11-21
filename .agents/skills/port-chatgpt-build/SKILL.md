@@ -5,9 +5,7 @@ description: Port the router patch to a new official ChatGPT (Codex) macOS build
 
 # Port a new ChatGPT build
 
-A port locates the renamed or reshaped minified anchors, records a profile,
-and proves it. Done means the newest build is in `SUPPORTED_BUILDS`, every
-check below passes, and the port is pushed to `main`.
+Record and prove exact anchors in `SUPPORTED_BUILDS`; pass all checks and push to `main`.
 
 ## Rules
 
@@ -22,7 +20,6 @@ check below passes, and the port is pushed to `main`.
   in the same message. Land verified ports directly on `main` without PRs.
 
 ## 1. Detect and fetch
-
 The daily `Upstream` workflow fails when a new build needs a port. Locally:
 
 ```sh
@@ -34,7 +31,6 @@ newest-three request, stop only if `appcast.supported(version, build)` passes
 for all of `appcast.builds()[:3]`; fetch gaps with `appcast.fetch`.
 
 ## 2. Port the profile
-
 ```sh
 python3 scripts/port_renderer.py --source <app> > /tmp/profile.py
 ```
@@ -47,18 +43,23 @@ alias it and register the shared profile once. Resolve the listed gaps:
 
 - Find the moved code by a string literal or property name from the old
   anchor, and copy the new anchor verbatim from the bundle. Never retype it.
-- Make anchors unique by shape; the menu marker, menu helper, and RPC anchor
-  together must identify one profile; adjacent builds can share any two.
+- The menu marker, menu helper, RPC, and message-dispatch anchors together
+  must identify exactly one profile, even when adjacent builds share most.
 - Borrow only imports, hoisted functions, or variables of a module the patched
   component itself initializes. Otherwise draw it (see the usage icon) or read
   it through a live import.
 - Give every borrowed identifier a probe in `identifier_probes`, taken from a
   usage site that is unique by shape, never from an import clause. Check its
   binding in the injection bundle: a capture in another chunk may name a
-  different local alias even when the generator reports no gap.
-- Our UI lives in the eager `app-initial` bundle next to `menu_anchor`; lazy
-  chunks only call it through `globalThis`. Patches land in whichever bundle
-  holds their anchor, so moved code needs a new anchor, not a new mechanism.
+  different local alias even when the generator reports no gap. Check lexical
+  scope at each insertion: nested props or `let` bindings can shadow module names.
+  Use an unshadowed module alias when passing a native component.
+- Use `port_renderer.py --source <app> --modules` to inspect webpack module
+  boundaries. Bindings are local to each closure; repeated IDs in different
+  chunks must not be collapsed. Our UI lives beside `menu_anchor`; `startup`
+  loads that module through its native dependency list before the first render.
+  Lazy chunks call the UI through `globalThis`. Verify a cold launch without
+  opening the profile menu so an initialization race cannot hide.
 - When main-process code or packaging changes shape, teach the one helper
   both shapes instead of branching per build (see `attach_router_updater`),
   and drop the old shape with the last build that had it. A string that moves
@@ -68,7 +69,6 @@ alias it and register the shared profile once. Resolve the listed gaps:
 Finish with `port_renderer.py --source <app> --reference <build>` exiting 0.
 
 ## 3. Verify
-
 ```sh
 npm ci --ignore-scripts && npm run check
 python3 scripts/verify_build.py --source <app>
@@ -88,7 +88,9 @@ The staged app must boot: `python3 scripts/launch_check.py --app <staged>`
 targets the staged CLI with an isolated desktop profile. It requires a rendered
 UI and an initialized app-server, without a test-server port. Signing and
 Electron hardening only show up here. The router, adjacent `codex.real`, and
-`codex-cli/bin/codex` must each print the Codex version. Then run the live
+`codex-cli/bin/codex` must each print the Codex version. Also call the staged
+wrapper with `app-server --print-startup-config` and require valid JSON:
+a live router lock can mask wrapper failures during boot. Then run the live
 move test against the staged `codex.real` (`scripts/live_seed.py` prepares its
 home). The live test must force `CODEX_MUX_PRIMARY_SQLITE_HOME` into its copied
 primary home; never inherit the running desktop's database path. After his
@@ -97,10 +99,10 @@ primary home; never inherit the running desktop's database path. After his
 (delete a broken installed copy by exact path first so the backup stays the
 last good build), relaunch with `launchctl setenv CODEX_MUX_UI_TESTS 1`, and
 check the profile menu, composer account picker, usage sheet, and thread panel
-through the bridge on port 48124. Unset the variable afterwards.
+through the bridge on port 48124. Also render an existing chat turn and a session
+message card; cold-boot readiness alone misses component errors. Unset it afterwards.
 
 ## 4. Release
-
 1. Commit as `Support ChatGPT build <build> (<version>, Codex <cli version>)`.
 2. Update `docs/COMPATIBILITY.md`, the Unreleased section of `CHANGELOG.md`,
    and bump the minor version as `docs/RELEASING.md` describes.
@@ -112,10 +114,8 @@ through the bridge on port 48124. Unset the variable afterwards.
    no further go is needed. Publishing enables the installed Update button.
 
 ## 5. Housekeeping
-
 Delete by exact path: source apps in `~/.codex-mux/sources` that are no longer
 supported, and scratch extractions. The patcher keeps a single install backup
-and the updater prunes release sources and older official builds. Leave the
-diff smaller than you found it.
+and the updater prunes old release sources. Leave the diff smaller than before.
 
-Fix incorrect skill steps in the same commit; keep this under 120 lines.
+Fix incorrect steps in the same commit; keep this under 120 lines.

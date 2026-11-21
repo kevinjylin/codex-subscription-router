@@ -14,7 +14,7 @@ import (
 
 var (
 	threadIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	linkIDPattern   = regexp.MustCompile(`_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
+	linkIDPattern   = regexp.MustCompile(`_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$`)
 )
 
 var historyTables = []string{
@@ -42,7 +42,9 @@ func projectionStream(rollout, threadID string) string {
 // the target's row is pointed at the source's current rollout, and the
 // projection rows of every stream are copied. The files are shared, so the
 // derived rows apply unchanged. A forked thread keeps its history in the
-// thread it was forked from, so that thread's copy is brought along too.
+// thread it was forked from, so that thread's history is brought along too.
+// Existing ancestor files, index paths and projections stay with their owner;
+// only missing ancestor streams are imported.
 func syncThreadCopy(sourceHome, targetHome, threadID string) error {
 	if !threadIDPattern.MatchString(threadID) {
 		return fmt.Errorf("unexpected thread id %q", threadID)
@@ -63,6 +65,7 @@ func copyThread(sourceHome, targetHome, threadID string, copied map[string]struc
 	if _, done := copied[threadID]; done {
 		return nil
 	}
+	ancestor := len(copied) > 0
 	copied[threadID] = struct{}{}
 	row, err := querySQLite(
 		stateDatabase(sourceHome),
@@ -83,13 +86,14 @@ func copyThread(sourceHome, targetHome, threadID string, copied map[string]struc
 		}
 		return fmt.Errorf("source does not index thread %s", threadID)
 	}
-	streams := []string{threadID}
+	var streams []string
 	for _, rollout := range threadRollouts(sourceHome, threadID) {
-		if _, err := linkRolloutIntoHome(rollout, targetHome); err != nil {
+		_, created, err := shareRolloutIntoHome(rollout, targetHome, ancestor)
+		if err != nil {
 			return err
 		}
-		if stream := projectionStream(rollout, threadID); stream != threadID {
-			streams = append(streams, stream)
+		if !ancestor || created {
+			streams = append(streams, projectionStream(rollout, threadID))
 		}
 		if base := historyBaseThread(rollout); base != "" && base != threadID {
 			owner := rolloutOwner(sourceHome, base)
@@ -101,32 +105,45 @@ func copyThread(sourceHome, targetHome, threadID string, copied map[string]struc
 			}
 		}
 	}
-	current, err := linkRolloutIntoHome(path, targetHome)
+	// Codex compresses a cold rollout in place and keeps indexing its plain name.
+	file := path
+	if !fileExists(file) && fileExists(file+".zst") {
+		file += ".zst"
+	}
+	current, created, err := shareRolloutIntoHome(file, targetHome, ancestor)
 	if err != nil {
 		return err
 	}
-	if err := upsertThreadRow(stateDatabase(sourceHome), stateDatabase(targetHome), threadID, current, mode); err != nil {
+	current = strings.TrimSuffix(current, strings.TrimPrefix(file, path))
+	if created {
+		streams = append(streams, projectionStream(path, threadID))
+	}
+	if err := upsertThreadRow(stateDatabase(sourceHome), stateDatabase(targetHome), threadID, current, mode, !ancestor); err != nil {
 		return err
 	}
 	return copyProjection(sourceHome, targetHome, streams)
 }
 
-// copyStreams links a thread's rollouts and copies their projection rows
-// without touching the target's index.
+// copyStreams imports missing ancestor streams without touching the target's
+// existing files, projections or index.
 func copyStreams(sourceHome, targetHome, threadID string) error {
-	streams := []string{threadID}
+	var streams []string
 	for _, rollout := range threadRollouts(sourceHome, threadID) {
-		if _, err := linkRolloutIntoHome(rollout, targetHome); err != nil {
+		_, created, err := shareRolloutIntoHome(rollout, targetHome, true)
+		if err != nil {
 			return err
 		}
-		if stream := projectionStream(rollout, threadID); stream != threadID {
-			streams = append(streams, stream)
+		if created {
+			streams = append(streams, projectionStream(rollout, threadID))
 		}
 	}
 	return copyProjection(sourceHome, targetHome, streams)
 }
 
 func copyProjection(sourceHome, targetHome string, streams []string) error {
+	if len(streams) == 0 {
+		return nil
+	}
 	sourceHistory := historyDatabase(sourceHome)
 	if !fileExists(sourceHistory) {
 		return nil
@@ -153,8 +170,9 @@ func copyProjection(sourceHome, targetHome string, streams []string) error {
 
 // upsertThreadRow gives the target index a row for the thread: a clone of the
 // source's row when the target has none (section columns keep their local
-// defaults), then the current rollout path and history mode in either case.
-func upsertThreadRow(sourceDB, targetDB, threadID, rollout, mode string) error {
+// defaults). Only the moving chat updates an existing current path and mode;
+// an ancestor may already be further ahead on the destination.
+func upsertThreadRow(sourceDB, targetDB, threadID, rollout, mode string, updateExisting bool) error {
 	targetColumns, err := threadColumns(targetDB)
 	if err != nil {
 		return err
@@ -174,16 +192,25 @@ func upsertThreadRow(sourceDB, targetDB, threadID, rollout, mode string) error {
 	}
 	sort.Strings(columns)
 	list := strings.Join(quoteIdentifiers(columns), ", ")
-	return runSQLite(targetDB, strings.Join([]string{
+	values := quoteIdentifiers(columns)
+	for i, column := range columns {
+		if column == "rollout_path" {
+			values[i] = "'" + escapeSQLLiteral(rollout) + "'"
+		}
+	}
+	script := []string{
 		"PRAGMA busy_timeout=10000;",
 		fmt.Sprintf("ATTACH DATABASE '%s' AS src;", escapeSQLLiteral(sourceDB)),
-		fmt.Sprintf("INSERT OR IGNORE INTO threads (%s) SELECT %s FROM src.threads WHERE id = '%s';", list, list, threadID),
-		fmt.Sprintf(
+		fmt.Sprintf("INSERT OR IGNORE INTO threads (%s) SELECT %s FROM src.threads WHERE id = '%s';", list, strings.Join(values, ", "), threadID),
+	}
+	if updateExisting {
+		script = append(script, fmt.Sprintf(
 			"UPDATE threads SET rollout_path = '%s', history_mode = '%s' WHERE id = '%s';",
 			escapeSQLLiteral(rollout), escapeSQLLiteral(mode), threadID,
-		),
-		"DETACH DATABASE src;",
-	}, "\n"))
+		))
+	}
+	script = append(script, "DETACH DATABASE src;")
+	return runSQLite(targetDB, strings.Join(script, "\n"))
 }
 
 // ensureHistorySchema gives a target home that has not opened its history
@@ -219,7 +246,12 @@ func historyBaseThread(rollout string) string {
 		return ""
 	}
 	defer file.Close()
-	reader := bufio.NewReaderSize(file, 1<<20)
+	source, closeSource, err := rolloutReader(file)
+	if err != nil {
+		return ""
+	}
+	defer closeSource()
+	reader := bufio.NewReaderSize(source, 1<<20)
 	line, err := reader.ReadBytes('\n')
 	if len(line) == 0 && err != nil {
 		return ""
@@ -240,7 +272,7 @@ func historyBaseThread(rollout string) string {
 	return record.Payload.HistoryBase.ThreadID
 }
 
-var rolloutThreadPattern = regexp.MustCompile(`-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f-]{36})?\.jsonl$`)
+var rolloutThreadPattern = regexp.MustCompile(`-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_[0-9a-f-]{36})?\.jsonl(?:\.zst)?$`)
 
 // rolloutOwner resolves the thread whose rollout carries a history stream.
 // A fork's history base names the stream it continues from, which is the
@@ -256,9 +288,13 @@ func rolloutOwner(codexHome, streamID string) string {
 	return streamID
 }
 
-// threadRollouts lists every rollout segment of a thread in a Codex home.
+// threadRollouts lists every rollout segment of a thread in a Codex home,
+// including the sealed segments Codex compresses to `.jsonl.zst`; resuming
+// follows the lineage through them.
 func threadRollouts(codexHome, threadID string) []string {
 	matches, _ := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "*"+threadID+"*.jsonl"))
+	compressed, _ := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "*"+threadID+"*.jsonl.zst"))
+	matches = append(matches, compressed...)
 	rollouts := make([]string, 0, len(matches))
 	for _, match := range matches {
 		if info, err := os.Stat(match); err == nil && info.Mode().IsRegular() {

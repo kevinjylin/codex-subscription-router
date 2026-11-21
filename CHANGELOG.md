@@ -40,14 +40,207 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
   menu. Use the composer account picker to move chats or set the default for
   new chats; profile account management and usage remain available.
 
-## [0.21.0] - 2026-10-16
+### Improved
+
+- Sort messageable sessions by recent activity and find Claude conversations by
+  their opening request or recent messages when their generated title names only
+  the working directory. Accept a unique search match as a message target.
+
+## [0.30.0] - 2026-11-11
+
+### Added
+
+- Support official ChatGPT build `26605` (`26.1106.51428`), with Codex CLI
+  `0.167.0-alpha.4.1`. Builds `25894` and `25679` remain supported, covering
+  the newest three official appcast builds.
+
+### Changed
+
+- Port the native menu, settings, Usage, profile, chat-message, and thread-panel
+  bindings to the new renderer. Preserve the native message component alias
+  and selected-account reset behavior. Retire build `25471`.
+
+## [0.29.0] - 2026-11-09
+
+### Added
+
+- Support official ChatGPT build `25894` (`26.1103.60933`), with the same
+  bundled Codex CLI `0.167.0-alpha.3.2`. Builds `25679` and `25471` remain
+  supported, covering the newest three official appcast builds.
+
+### Changed
+
+- Reuse the verified renderer profile and retain the fixes for chat rendering
+  and moving histories with compressed rollout segments from `0.28.1` and
+  `0.28.2`. Retire build `25241` and its startup variant.
+
+## [0.28.2] - 2026-11-08
+
+### Fixed
+
+- Move chats whose history includes compressed segments. Codex compresses
+  cold rollout segments to `.jsonl.zst` in place and keeps indexing their
+  plain names; resuming follows each segment's `history_base` through them.
+  The router shared only `.jsonl` files, so the destination failed with
+  `thread/resume: invalid paginated history lineage for ...: missing source
+  rollout`. It now shares compressed segments, reads their lineage, uses the
+  compressed file of an indexed rollout whose plain file is gone, and compares
+  an ancestor's existing copy by its decompressed records.
+
+## [0.28.1] - 2026-11-08
+
+### Fixed
+
+- Render chat turns again on builds `25679`, `25471`, and `25241`. The
+  cross-session message card was handed the turn renderer's own `J`, a binding
+  shadowed by a prop and by a block `let` declared later, so every user message
+  threw `Cannot access 'J' before initialization` and each turn showed "This
+  turn couldn't render". The card now gets a module alias of the native message
+  component.
+
+## [0.28.0] - 2026-11-08
+
+### Added
+
+- Support official ChatGPT builds `25679` (`26.1103.41825`), `25471`
+  (`26.1103.32239`), and `25241` (`26.1103.31037`), all with Codex CLI
+  `0.167.0-alpha.3.2`.
+
+### Changed
+
+- Port account routing, usage resets, combined profiles, plugin selection,
+  fork titles, and cross-session message cards to the new webpack renderer.
+  Initialize the router UI before the first render, including when the
+  native profile menu has not been opened.
+- Retire builds `22943`, `22530`, and `22391` and their renderer profiles.
+- Add an AST module inventory to the porting tool to distinguish bindings
+  in separate closures and preserve repeated module IDs across chunks.
+
+### Fixed
+
+- Keep the usage-sheet account selector current after switching accounts.
+  Send a reset to the account selected when clicked, and update that account's
+  cached credits even if the user switches accounts while the reset is pending.
+
+## [0.27.0] - 2026-10-30
+
+### Added
+
+- Support official ChatGPT build `22943` (`26.1027.30824`) with Codex CLI
+  `0.166.0-alpha.5.1`. Builds `22530` and `22391` remain supported, covering
+  the newest three official appcast builds.
+
+### Changed
+
+- Port the router UI to the new renderer's exact anchors and bindings.
+  Retire build `21828` and its renderer profile.
+- Adapt combined and per-account statistics to the new Profile page API,
+  preserving native profile editing and pins. Hide unavailable chat counts
+  instead of mixing the primary account's counts with pooled token usage.
+- Locate desktop patches by unique code anchors across the new bundle layout.
+  Remove the official app's associated-domains entitlement when signing the
+  independent copy so macOS permits it to launch.
+
+## [0.26.0] - 2026-10-28
+
+### Added
+
+- Support official ChatGPT builds `22530` (`26.1023.51421`) and `22391`
+  (`26.1023.50603`), both with Codex CLI `0.165.0-alpha.1.2`. The newest
+  three official builds are supported, including `21828`.
+
+### Changed
+
+- Port the account menu, usage sheet, settings, composer, thread panel,
+  and session-message cards to the new renderer layout. The two profiles share
+  their common anchors; retired builds `21477` and `21747` are removed.
+- Check the staged router's one-shot startup configuration directly as
+  well as booting its UI, so a running app cannot mask a wrapper failure.
+
+## [0.25.2] - 2026-10-24
+
+### Fixed
+
+- Reordering pinned chats no longer fails with "Couldn't save pinned order"
+  depending on which list the sidebar loaded last. The router kept one view
+  of pins, rebuilt from each listing: after the all-chats list it could pick
+  an account's unpinned copy as the pin and anchor a move on a chat outside
+  that account's section, which Codex refuses; after the archived list it
+  forgot every pin. It now keeps each copy's section per account, keeps
+  copies a listing leaves out, places a pin at the copy that is in the
+  section, and anchors moves only on chats in that account's section.
+
+## [0.25.1] - 2026-10-24
+
+### Fixed
+
+- Moving a chat no longer fails with "a different rollout already exists"
+  when the destination holds its own copy of the chat's history. Copying a
+  home to a new macOS account turns the router's shared hard links into
+  separate files; a destination copy that holds nothing the source lacks is
+  now replaced by a link to the source. A copy with history the source lacks
+  still blocks the move.
+
+## [0.25.0] - 2026-10-24
+
+### Fixed
+
+- Builds `21747` and `21828` no longer stop at "Organization settings could
+  not be loaded" when the router app starts. The desktop now reads its
+  startup requirements with a one-shot `app-server --print-startup-config`;
+  the router passes it to Codex instead of starting a multiplexer that
+  printed nothing.
+- Moving a fork can reuse independently copied ancestor history when the
+  destination contains the same bytes or a newer matching copy. Existing
+  ancestor files, current rollout paths, and projections are preserved;
+  genuinely divergent history still blocks the move.
+
+### Added
+
+- Incoming cross-session messages show the sender in a compact, left-aligned
+  card with the app's native expand and copy controls. The XML envelope stays
+  in model input but is hidden from the card; quoted examples and messages
+  with attachments retain their normal presentation.
+- Guarded offline history-index repair for chats whose projection cursor is
+  past the end of a rollout. It backs up the index and asks the native CLI to
+  rebuild affected streams without editing chat files or saving a fork.
+
+## [0.24.0] - 2026-10-24
+
+### Added
+
+- Compatibility with official ChatGPT builds `21828` (26.1021.31345),
+  `21747` (26.1021.22027), and `21477` (26.1016.62342).
+  Builds `21421`, `21161`, and `20770` are retired.
+
+### Fixed
+
+- Moving a chat back to an account within five seconds no longer hides the
+  new owner's turn notifications behind the previous release's mute window.
+
+## [0.23.0] - 2026-10-22
+
+### Added
+
+- Compatibility with official ChatGPT build `21421` (26.1016.61520),
+  bundling Codex 0.163.0-alpha.11.1. Builds `21161` and `20770` remain
+  supported; build `20586` is retired.
+
+## [0.22.0] - 2026-10-21
+
+### Added
+
+- Compatibility with official ChatGPT build `21161` (26.1016.51333),
+  bundling Codex 0.163.0-alpha.11. Builds `20770` and `20586` remain
+  supported; build `20398` is retired.
+
+## [0.21.0] - 2026-10-17
 
 ### Added
 
 - Compatibility with official ChatGPT build `20770` (26.1013.40934),
   bundling Codex 0.163.0-alpha.10.2. Builds `20586` and `20398` remain
-  supported; build `20324` is retired. The re-signed Chrome bridge retains
-  every reviewed byte before its code signature.
+  supported; build `20324` is retired.
 
 ## [0.20.0] - 2026-10-16
 
@@ -473,7 +666,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/); versioning:
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/braindead-dev/codex-subscription-router/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.30.0
+[0.29.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.29.0
+[0.28.2]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.28.2
+[0.28.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.28.1
+[0.28.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.28.0
+[0.27.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.27.0
+[0.26.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.26.0
+[0.25.2]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.25.2
+[0.25.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.25.1
+[0.25.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.25.0
+[0.24.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.24.0
+[0.23.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.23.0
+[0.22.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.22.0
 [0.21.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.21.0
 [0.20.0]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.20.0
 [0.19.1]: https://github.com/braindead-dev/codex-subscription-router/releases/tag/v0.19.1

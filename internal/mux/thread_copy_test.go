@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestSyncThreadCopyBringsTargetUpToDate(t *testing.T) {
@@ -185,6 +187,54 @@ func TestSyncThreadCopyBringsForkedFromThreadAlong(t *testing.T) {
 			t.Fatalf("expected %s to have a projection on the target, got %q err=%v", id, offset, err)
 		}
 	}
+
+	// An independently copied ancestor may have progressed on the target.
+	// Moving its fork must preserve that file, current path and every derived
+	// table, even though the source still indexes an older ancestor rollout.
+	targetParent := threadRollouts(target, parentID)[0]
+	parentBody, err := os.ReadFile(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(targetParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetParent, append(parentBody, []byte("later ancestor turn\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(targetParent)
+	newCurrent := filepath.Join(target, "sessions", "newer-ancestor.jsonl")
+	if err := runSQLite(stateDatabase(target), "update threads set rollout_path = '"+newCurrent+"' where id = '"+parentID+"';"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSQLite(historyDatabase(target), "update thread_history_projection_state set next_rollout_byte_offset = 999 where thread_id = '"+parentID+"';"+
+		"insert into thread_turns values ('"+parentID+"', 'newer', 99);"+
+		"insert into thread_items values ('"+parentID+"', 'newer', 'item', 99);"+
+		"insert into thread_realtime_items values ('"+parentID+"', 'item');"); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncThreadCopy(source, target, forkID); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(targetParent)
+	if !os.SameFile(before, after) || before.Size() != after.Size() {
+		t.Fatal("moving a fork replaced its ancestor")
+	}
+	row, err := querySQLite(stateDatabase(target), "select rollout_path from threads where id = '"+parentID+"';")
+	if err != nil || strings.TrimSpace(row) != newCurrent {
+		t.Fatalf("ancestor current rollout changed: %q, %v", row, err)
+	}
+	for _, table := range historyTables {
+		value := "count(*)"
+		want := "1"
+		if table == "thread_history_projection_state" {
+			value, want = "next_rollout_byte_offset", "999"
+		}
+		row, err := querySQLite(historyDatabase(target), "select "+value+" from "+table+" where thread_id = '"+parentID+"';")
+		if err != nil || strings.TrimSpace(row) != want {
+			t.Fatalf("ancestor %s changed: %q, %v", table, row, err)
+		}
+	}
 }
 
 func TestHistoryBaseThreadIgnoresOwnHistory(t *testing.T) {
@@ -219,59 +269,93 @@ func TestRolloutOwnerResolvesContinuationStreams(t *testing.T) {
 	}
 }
 
-func TestSyncThreadCopyCarriesAnUnindexedHistoryBase(t *testing.T) {
+func TestSyncThreadCopyCarriesTheHistoryBase(t *testing.T) {
 	if _, err := os.Stat(sqlite3Binary); err != nil {
 		t.Skip("sqlite3 is not available")
 	}
-	root := t.TempDir()
-	source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
-	baseID := "01a04238-6090-7e01-b2c6-24c757a32b10"
-	linkID := "01a07dfe-ac02-7393-b113-81a48193c591"
-	forkID := "01a08c71-52c7-7651-b40e-929694f82b26"
-	base := filepath.Join(source, "sessions", "2026", "09", "07", "rollout-base-"+baseID+"_"+linkID+".jsonl")
-	fork := filepath.Join(source, "sessions", "2026", "09", "11", "rollout-fork-"+forkID+".jsonl")
-	for path, meta := range map[string]string{
-		base: `{"type":"session_meta","payload":{"id":"` + baseID + `","history_mode":"paginated"}}`,
-		fork: `{"type":"session_meta","payload":{"id":"` + forkID + `","history_base":{"thread_id":"` + linkID + `","end_ordinal_exclusive":2,"end_byte_offset":90}}}`,
-	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(meta+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	schema := "create table threads (id text primary key, rollout_path text, history_mode text);"
-	history := "create table thread_turns (thread_id text, turn_id text, rollout_ordinal integer);" +
-		"create table thread_items (thread_id text, turn_id text, item_id text, rollout_ordinal integer);" +
-		"create table thread_history_projection_state (thread_id text primary key, next_rollout_byte_offset integer, next_rollout_ordinal integer);" +
-		"create table thread_realtime_items (thread_id text, item_id text);"
-	for _, home := range []string{source, target} {
-		if err := runSQLite(stateDatabase(home), schema); err != nil {
-			t.Fatal(err)
-		}
-		if err := runSQLite(historyDatabase(home), history); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := runSQLite(stateDatabase(source), "insert into threads values ('"+forkID+"', '"+fork+"', 'paginated');"); err != nil {
-		t.Fatal(err)
-	}
-	if err := runSQLite(historyDatabase(source), "insert into thread_history_projection_state values ('"+linkID+"', 90, 2), ('"+forkID+"', 120, 2);"); err != nil {
-		t.Fatal(err)
-	}
+	// Codex compresses cold segments in place and keeps indexing their plain
+	// names; the lineage runs through them. An unindexed base resumes by file.
+	for _, suffix := range []string{".jsonl", ".jsonl.zst"} {
+		t.Run(suffix, func(t *testing.T) {
+			compressed := suffix == ".jsonl.zst"
+			root := t.TempDir()
+			source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
+			baseID := "01a04238-6090-7e01-b2c6-24c757a32b10"
+			linkID := "01a07dfe-ac02-7393-b113-81a48193c591"
+			forkID := "01a08c71-52c7-7651-b40e-929694f82b26"
+			continuationID := "01a09d10-1c2e-7f00-9d3a-5b6c7d8e9f01"
+			base := filepath.Join(source, "sessions", "2026", "09", "07", "rollout-base-"+baseID+"_"+linkID+suffix)
+			fork := filepath.Join(source, "sessions", "2026", "09", "11", "rollout-fork-"+forkID+suffix)
+			current := filepath.Join(source, "sessions", "2026", "09", "12", "rollout-fork-"+forkID+"_"+continuationID+".jsonl")
+			for path, meta := range map[string]string{
+				base:    `{"type":"session_meta","payload":{"id":"` + baseID + `","history_mode":"paginated"}}`,
+				fork:    `{"type":"session_meta","payload":{"id":"` + forkID + `","history_base":{"thread_id":"` + linkID + `","end_ordinal_exclusive":2,"end_byte_offset":90}}}`,
+				current: `{"type":"session_meta","payload":{"id":"` + forkID + `","history_base":{"thread_id":"` + forkID + `","end_ordinal_exclusive":2,"end_byte_offset":120}}}`,
+			} {
+				content := []byte(meta + "\n")
+				if strings.HasSuffix(path, ".zst") {
+					encoder, err := zstd.NewWriter(nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					content = encoder.EncodeAll(content, nil)
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			schema := "create table threads (id text primary key, rollout_path text, history_mode text);"
+			history := "create table thread_turns (thread_id text, turn_id text, rollout_ordinal integer);" +
+				"create table thread_items (thread_id text, turn_id text, item_id text, rollout_ordinal integer);" +
+				"create table thread_history_projection_state (thread_id text primary key, next_rollout_byte_offset integer, next_rollout_ordinal integer);" +
+				"create table thread_realtime_items (thread_id text, item_id text);"
+			for _, home := range []string{source, target} {
+				if err := runSQLite(stateDatabase(home), schema); err != nil {
+					t.Fatal(err)
+				}
+				if err := runSQLite(historyDatabase(home), history); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runSQLite(stateDatabase(source), "insert into threads values ('"+forkID+"', '"+current+"', 'paginated');"); err != nil {
+				t.Fatal(err)
+			}
+			if compressed {
+				if err := runSQLite(stateDatabase(source), "insert into threads values ('"+baseID+"', '"+strings.TrimSuffix(base, ".zst")+"', 'paginated');"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runSQLite(historyDatabase(source), "insert into thread_history_projection_state values ('"+linkID+"', 90, 2), ('"+forkID+"', 120, 2), ('"+continuationID+"', 60, 3);"); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := syncThreadCopy(source, target, forkID); err != nil {
-		t.Fatal(err)
-	}
-	if rollouts := threadRollouts(target, linkID); len(rollouts) != 1 {
-		t.Fatalf("expected the base continuation to be linked, got %v", rollouts)
-	}
-	offset, err := querySQLite(historyDatabase(target), "select next_rollout_byte_offset from thread_history_projection_state where thread_id = '"+linkID+"';")
-	if err != nil || strings.TrimSpace(offset) != "90" {
-		t.Fatalf("expected the base stream's projection on the target, got %q err=%v", offset, err)
+			if err := syncThreadCopy(source, target, forkID); err != nil {
+				t.Fatal(err)
+			}
+			if rollouts := threadRollouts(target, forkID); len(rollouts) != 2 {
+				t.Fatalf("expected both of the fork's segments to be linked, got %v", rollouts)
+			}
+			if rollouts := threadRollouts(target, linkID); len(rollouts) != 1 {
+				t.Fatalf("expected the base continuation to be linked, got %v", rollouts)
+			}
+			if compressed {
+				row, err := querySQLite(stateDatabase(target), "select rollout_path from threads where id = '"+baseID+"';")
+				if want := filepath.Join(target, "sessions", "2026", "09", "07", "rollout-base-"+baseID+"_"+linkID+".jsonl"); err != nil || strings.TrimSpace(row) != want {
+					t.Fatalf("expected the base indexed by its plain name on the target, got %q err=%v", row, err)
+				}
+			}
+			for stream, want := range map[string]string{linkID: "90", forkID: "120"} {
+				offset, err := querySQLite(historyDatabase(target), "select next_rollout_byte_offset from thread_history_projection_state where thread_id = '"+stream+"';")
+				if err != nil || strings.TrimSpace(offset) != want {
+					t.Fatalf("expected stream %s's projection on the target, got %q err=%v", stream, offset, err)
+				}
+			}
+		})
 	}
 }

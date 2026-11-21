@@ -1,12 +1,16 @@
 package mux
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // linkRolloutIntoHome gives an account its own path to another account's
@@ -15,29 +19,134 @@ import (
 // sessions/YYYY/MM/DD layout. Both accounts keep appending to the one file,
 // and the link outlives the source deleting its own name.
 func linkRolloutIntoHome(sourcePath, codexHome string) (string, error) {
+	target, _, err := shareRolloutIntoHome(sourcePath, codexHome, false)
+	return target, err
+}
+
+// An ancestor is a read-only dependency of the moving chat. It may already
+// have an independent, newer copy on the destination. Reuse that copy only
+// when it contains the entire source as a byte-identical prefix; never replace
+// its file or derived history. The moving chat's own rollout may find a
+// separate copy that no longer shares the source's file: copying a home to a
+// new macOS account turns every hard link into its own file. When that copy
+// holds nothing the source lacks, it is replaced by a link to the source; the
+// chat is not open on the destination, so nothing writes to the old copy.
+// The bool reports a newly created hard link.
+func shareRolloutIntoHome(sourcePath, codexHome string, ancestor bool) (string, bool, error) {
 	marker := string(filepath.Separator) + "sessions" + string(filepath.Separator)
 	index := strings.LastIndex(sourcePath, marker)
 	if index < 0 {
-		return "", fmt.Errorf("rollout is not in a sessions directory: %s", sourcePath)
+		return "", false, fmt.Errorf("rollout is not in a sessions directory: %s", sourcePath)
 	}
 	target := filepath.Join(codexHome, "sessions", sourcePath[index+len(marker):])
 	if target == sourcePath {
-		return target, nil
+		return target, false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return "", fmt.Errorf("create sessions directory: %w", err)
+		return "", false, fmt.Errorf("create sessions directory: %w", err)
 	}
 	err := os.Link(sourcePath, target)
 	if err == nil {
-		return target, nil
+		return target, true, nil
 	}
 	if !errors.Is(err, fs.ErrExist) {
-		return "", fmt.Errorf("link rollout: %w", err)
+		return "", false, fmt.Errorf("link rollout: %w", err)
 	}
 	sourceInfo, sourceErr := os.Stat(sourcePath)
 	targetInfo, targetErr := os.Stat(target)
-	if sourceErr != nil || targetErr != nil || !os.SameFile(sourceInfo, targetInfo) {
-		return "", fmt.Errorf("a different rollout already exists at %s", target)
+	if sourceErr == nil && targetErr == nil && os.SameFile(sourceInfo, targetInfo) {
+		return target, false, nil
 	}
-	return target, nil
+	if ancestor && rolloutPrefixMatches(sourcePath, target) {
+		return target, false, nil
+	}
+	// The destination's copy is the start of the source: rejoin the source.
+	if !ancestor && rolloutPrefixMatches(target, sourcePath) {
+		if err := replaceWithLink(sourcePath, target); err != nil {
+			return "", false, err
+		}
+		return target, true, nil
+	}
+	return "", false, fmt.Errorf("a different rollout already exists at %s", target)
+}
+
+// replaceWithLink swaps target for a hard link to source in one rename. The
+// temporary name does not end in .jsonl, so no rollout scan picks it up.
+func replaceWithLink(sourcePath, target string) error {
+	temporary := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+".link")
+	if err := os.Remove(temporary); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clear rollout link: %w", err)
+	}
+	if err := os.Link(sourcePath, temporary); err != nil {
+		return fmt.Errorf("link rollout: %w", err)
+	}
+	if err := os.Rename(temporary, target); err != nil {
+		_ = os.Remove(temporary)
+		return fmt.Errorf("rejoin rollout: %w", err)
+	}
+	return nil
+}
+
+func rolloutPrefixMatches(sourcePath, targetPath string) bool {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return false
+	}
+	defer source.Close()
+	target, err := os.Open(targetPath)
+	if err != nil {
+		return false
+	}
+	defer target.Close()
+	sourceInfo, sourceErr := source.Stat()
+	targetInfo, targetErr := target.Stat()
+	if sourceErr != nil || targetErr != nil || !sourceInfo.Mode().IsRegular() || !targetInfo.Mode().IsRegular() {
+		return false
+	}
+	sourceReader, closeSource, err := rolloutReader(source)
+	if err != nil {
+		return false
+	}
+	defer closeSource()
+	targetReader, closeTarget, err := rolloutReader(target)
+	if err != nil {
+		return false
+	}
+	defer closeTarget()
+	left, right := make([]byte, 64*1024), make([]byte, 64*1024)
+	for {
+		size, err := io.ReadFull(sourceReader, left)
+		if size > 0 {
+			if _, err := io.ReadFull(targetReader, right[:size]); err != nil || !bytes.Equal(left[:size], right[:size]) {
+				return false
+			}
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			break
+		}
+		if err != nil {
+			return false
+		}
+	}
+	// Fail closed if either file changed while it was compared.
+	sourceAfter, sourceErr := os.Stat(sourcePath)
+	targetAfter, targetErr := os.Stat(targetPath)
+	return sourceErr == nil && targetErr == nil &&
+		os.SameFile(sourceInfo, sourceAfter) && os.SameFile(targetInfo, targetAfter) &&
+		sourceAfter.Size() == sourceInfo.Size() && sourceAfter.ModTime() == sourceInfo.ModTime() &&
+		targetAfter.Size() == targetInfo.Size() && targetAfter.ModTime() == targetInfo.ModTime()
+}
+
+// rolloutReader reads a rollout's records, decompressing a sealed segment
+// Codex stored as `.jsonl.zst`; its bytes differ between copies that hold the
+// same records.
+func rolloutReader(file *os.File) (io.Reader, func(), error) {
+	if !strings.HasSuffix(file.Name(), ".zst") {
+		return file, func() {}, nil
+	}
+	decoder, err := zstd.NewReader(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	return decoder, decoder.Close, nil
 }
